@@ -6,3 +6,5 @@ abc.history
 log.txt
 *.png
 compile_command.json
+output_*/
+benchmarks*/

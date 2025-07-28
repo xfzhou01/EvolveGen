@@ -16,7 +16,7 @@ This project generates benchmarks for High-Level Synthesis (HLS) model checking 
 ## Requirements
 
 ### Python Dependencies
-- Python 3.7+
+- Python 3.9+
 - `networkx` - For graph data structures and algorithms
 - `numpy` - For numerical operations
 - `matplotlib` - For graph visualization (optional)
