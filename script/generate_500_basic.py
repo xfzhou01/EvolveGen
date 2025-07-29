@@ -38,7 +38,7 @@ def generate_example(seed, output_base_dir, total_examples):
             "--cpp-file", "benchmark.cpp",
             "--project-name", "hls_benchmark",
             "--top-function", "top",
-            "--clock-period", "10",
+            "--action-count", "30",
             "--verbose"
         ]
         

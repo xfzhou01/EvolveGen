@@ -26,6 +26,12 @@ class GraphManager:
         self.cp_1 = 10
         self.cp_2 = 10
 
+    def get_clock_period_1(self):
+        return self.cp_1
+    
+    def get_clock_period_2(self):
+        return self.cp_2
+
     def _get_op_node_list(self):
         """Traverse the graph and return all OpNode instances as a list, excluding WRITE operation types."""
         op_nodes = []

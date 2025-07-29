@@ -20,9 +20,9 @@ def main():
     parser.add_argument('--cpp-file', type=str, default='benchmark.cpp', help='Name of the C++ output file (default: benchmark.cpp)')
     parser.add_argument('--project-name', type=str, default='hls_benchmark', help='HLS project name (default: hls_benchmark)')
     parser.add_argument('--top-function', type=str, default='top', help='Top-level function name (default: top)')
-    parser.add_argument('--clock-period', type=int, default=10, help='Clock period in nanoseconds (default: 10)')
     parser.add_argument('--skip-compilation', action='store_true', help='Skip Vitis HLS compilation step')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
+    parser.add_argument('--action-count', '-a', type=int, default=20, help='Max number of actions')
     
     args = parser.parse_args()
     
@@ -39,9 +39,11 @@ def main():
     try:
         # Step 1: Generate random graph
         print(f"[INFO] Generating random graph with seed {args.seed}...")
+        action_count = args.action_count
         graph_manager = RandomGraphManager(seed=args.seed)
         
-        success = graph_manager.generate_random_graph()
+        
+        success = graph_manager.generate_random_graph(action_number_total=action_count)
         if not success:
             print("[ERROR] Failed to generate random graph")
             return 1
@@ -97,6 +99,10 @@ def main():
         compilation_success = True
         
         for i, cpp_file in enumerate(cpp_files_created, 1):
+
+            if i > 2 or i <= 0:
+                raise ValueError(f"[ERROR] unexpected i = {i}, current cpp file = {cpp_file}")
+
             print(f"[INFO] Compiling file {i}/{len(cpp_files_created)}: {os.path.basename(cpp_file)}")
             
             # Create separate working directory for each compilation
@@ -112,11 +118,19 @@ def main():
             )
             
             try:
+
+                if i == 1:
+                    cp = graph_manager.cp_1
+                elif i == 2:
+                    cp = graph_manager.cp_2
+                else:
+                    raise ValueError()
+
                 # Compile this specific C++ file
                 compile_result = hls_compiler.compile(
                     project_name=f"{args.project_name}_{i}",
                     top_name=args.top_function,
-                    clock_period=args.clock_period,
+                    clock_period=cp,
                     cpp_file_list=[cpp_file]
                 )
                 

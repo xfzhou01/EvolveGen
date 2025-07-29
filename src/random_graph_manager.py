@@ -476,7 +476,7 @@ class RandomGraphManager(GraphManager):
         return True
 
 
-    def _generate_random_graph(self):
+    def _generate_random_graph(self, action_number_total = 20):
         """
         Generate a random graph by performing 100 random actions.
         Each action adds a different type of node or operation to the graph.
@@ -494,7 +494,6 @@ class RandomGraphManager(GraphManager):
         
         print("[INFO] Starting random graph generation with 100 actions...")
         successful_actions = 0
-        action_number_total = 20
         for i in range(action_number_total):
             # Randomly select an action from the list
             action = random.choice(action_list)
@@ -527,7 +526,7 @@ class RandomGraphManager(GraphManager):
         self.write_node_counter = 0
         self.branch_node_counter = 0
 
-    def generate_random_graph(self):
+    def generate_random_graph(self, action_number_total = 20):
         try:
             ret_code = self._generate_random_graph()
         except Exception as e:
