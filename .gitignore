@@ -8,3 +8,12 @@ log.txt
 compile_command.json
 output_*/
 benchmarks*/
+reference_materials/
+diagram/
+venv/
+generate/
+BanditFuzzz/
+pono-ng
+.env
+smt-sweeper
+run_benchmark.sh

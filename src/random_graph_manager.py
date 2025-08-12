@@ -485,9 +485,9 @@ class RandomGraphManager(GraphManager):
         action_list = [
             # self._action_random_add_array,
             self._action_random_add_input, 
-            self._action_random_add_op,
-            # self._action_random_add_loop,
-            # self._action_random_add_branch,
+
+            self._action_random_add_loop,
+            self._action_random_add_branch,
             # self._action_random_add_array_visit,
             # self._action_random_add_array_write
         ]
