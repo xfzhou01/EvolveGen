@@ -485,14 +485,14 @@ class RandomGraphManager(GraphManager):
         action_list = [
             # self._action_random_add_array,
             self._action_random_add_input, 
-
+            self._action_random_add_op,
             self._action_random_add_loop,
             self._action_random_add_branch,
             # self._action_random_add_array_visit,
             # self._action_random_add_array_write
         ]
         
-        print("[INFO] Starting random graph generation with 100 actions...")
+        print(f"[INFO] Starting random graph generation with {action_number_total} actions...")
         successful_actions = 0
         for i in range(action_number_total):
             # Randomly select an action from the list
@@ -510,7 +510,7 @@ class RandomGraphManager(GraphManager):
                 print(f"[ERROR] Action {i+1}/{action_number_total} failed with error: {e}")
                 raise e
         self._make_single_output()
-        print(f"[INFO] Random graph generation completed. {successful_actions}/100 actions were successful.")
+        print(f"[INFO] Random graph generation completed. {successful_actions}/{action_number_total} actions were successful.")
         return True
     
 
@@ -528,7 +528,7 @@ class RandomGraphManager(GraphManager):
 
     def generate_random_graph(self, action_number_total = 20):
         try:
-            ret_code = self._generate_random_graph()
+            ret_code = self._generate_random_graph(action_number_total=action_number_total)
         except Exception as e:
             print("[ERROR] encounter some errors during graph generation")
             self.print_node_list(ident="    ")
@@ -563,6 +563,18 @@ class RandomGraphManager(GraphManager):
         self.rand_type_gen = RandomTypeGenerator()
         self.rand_op_type_gen = RandomOpTypeGenerator()
         self.rand_pg_gen = RandomPragmaGenerator()
+
+        # BanditFuzz动作列表
+        self.bandit_action_list = [
+            self._action_random_add_input,
+            self._action_random_add_loop,
+            self._action_random_add_branch,
+            # 可以逐步启用更多动作
+             # self._action_random_add_array,
+            self._action_random_add_op,
+            # self._action_random_add_array_visit,
+            # self._action_random_add_array_write
+        ]
 
     def _copy_graph_and_insert_pragmas(self):
         """

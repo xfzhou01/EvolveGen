@@ -17,3 +17,6 @@ pono-ng
 .env
 smt-sweeper
 run_benchmark.sh
+src/agents/__pycache__/
+solver/rIC3-adaptive
+test_output/
