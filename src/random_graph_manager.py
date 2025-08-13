@@ -35,7 +35,7 @@ class RandomGraphManager(GraphManager):
             quant_mode = result_type[3]
             overflow_mode = result_type[4]
         else:
-            raise ValueError("err info", result_type)
+            raise ValueError("Error info", result_type)
         if len(result_type) == 5:
             if not isinstance(quant_mode, QuantizationMode):
                 raise TypeError("expected quant_mode have type QuantizationMode "+\
@@ -201,7 +201,7 @@ class RandomGraphManager(GraphManager):
         return l[selected_index]
     
     def _random_binary_choice(self):
-        # do a equal random binary choice that return boolean
+        # do an equal random binary choice that returns boolean
         return random.choice([True, False])
 
     def _action_random_add_array(self):
@@ -287,7 +287,7 @@ class RandomGraphManager(GraphManager):
         else:
             if is_belong_to_loop_block:
                 if not self._has_loop_node():
-                    raise ValueError("there is expected to be loop nodes")
+                    raise ValueError("there are expected to be loop nodes")
                 loop_node_p = self._random_get_loop_predecessor()
                 predecessor_list = self._random_get_op_node_predecessor_list(
                 op_node_r=op_node_r)
@@ -298,7 +298,7 @@ class RandomGraphManager(GraphManager):
                 )
             elif is_belong_to_branch_block:
                 if not self._has_branch_node():
-                    raise ValueError("there is expected to be branch nodes")
+                    raise ValueError("there are expected to be branch nodes")
                 branch_direction = self._random_binary_choice()
                 br_node_p = self._random_get_branch_predecessor()
                 predecessor_list = self._random_get_op_node_predecessor_list(
@@ -478,7 +478,7 @@ class RandomGraphManager(GraphManager):
 
     def _generate_random_graph(self, action_number_total = 20):
         """
-        Generate a random graph by performing 100 random actions.
+        Generate a random graph by performing specified number of random actions.
         Each action adds a different type of node or operation to the graph.
         """
         self._reset_all()
@@ -486,13 +486,13 @@ class RandomGraphManager(GraphManager):
             # self._action_random_add_array,
             self._action_random_add_input, 
             self._action_random_add_op,
-            # self._action_random_add_loop,
-            # self._action_random_add_branch,
+            self._action_random_add_loop,
+            self._action_random_add_branch,
             # self._action_random_add_array_visit,
             # self._action_random_add_array_write
         ]
         
-        print("[INFO] Starting random graph generation with 100 actions...")
+        print(f"[INFO] Starting random graph generation with {action_number_total} actions...")
         successful_actions = 0
         for i in range(action_number_total):
             # Randomly select an action from the list
@@ -510,14 +510,14 @@ class RandomGraphManager(GraphManager):
                 print(f"[ERROR] Action {i+1}/{action_number_total} failed with error: {e}")
                 raise e
         self._make_single_output()
-        print(f"[INFO] Random graph generation completed. {successful_actions}/100 actions were successful.")
+        print(f"[INFO] Random graph generation completed. {successful_actions}/{action_number_total} actions were successful.")
         return True
     
 
     
 
     def _reset_all(self):
-        print("[WARNING] resetting the generated graph and counters .....")
+        print("[WARNING] Resetting the generated graph and counters.....")
         self.program_graph = nx.DiGraph()
         self.loop_node_counter = 0
         self.op_counter = 0
@@ -528,13 +528,13 @@ class RandomGraphManager(GraphManager):
 
     def generate_random_graph(self, action_number_total = 20):
         try:
-            ret_code = self._generate_random_graph()
+            ret_code = self._generate_random_graph(action_number_total=action_number_total)
         except Exception as e:
-            print("[ERROR] encounter some errors during graph generation")
+            print("[ERROR] Encountered some errors during graph generation")
             self.print_node_list(ident="    ")
             raise e
         if not ret_code:
-            print("[INFO] fails to generate random graph")
+            print("[INFO] Failed to generate random graph")
             return False
         return True
 
@@ -542,7 +542,7 @@ class RandomGraphManager(GraphManager):
         # try:
         ret_code = self.generate_random_graph()
         # except Exception as e:
-        #     print("[ERROR] encounter some errors during graph generation")
+        #     print("[ERROR] Encountered some errors during graph generation")
         #     self.print_node_list(ident="    ")
         #     raise e
         if ret_code:
@@ -564,6 +564,18 @@ class RandomGraphManager(GraphManager):
         self.rand_op_type_gen = RandomOpTypeGenerator()
         self.rand_pg_gen = RandomPragmaGenerator()
 
+        # BanditFuzz action list
+        self.bandit_action_list = [
+            self._action_random_add_input,
+            self._action_random_add_loop,
+            self._action_random_add_branch,
+            # More actions can be enabled gradually
+             # self._action_random_add_array,
+            self._action_random_add_op,
+            # self._action_random_add_array_visit,
+            # self._action_random_add_array_write
+        ]
+
     def _copy_graph_and_insert_pragmas(self):
         """
         Override parent method to ensure different pragma generation for comparison files.
@@ -571,7 +583,7 @@ class RandomGraphManager(GraphManager):
         into each copy by using different random seeds.
         """
         import copy
-        print("[INFO] call RandomGraphManager::_copy_graph_and_insert_pragmas")
+        print("[INFO] Calling RandomGraphManager::_copy_graph_and_insert_pragmas")
         
         # Create deep copies of the graph to ensure node objects are independent
         self.program_graph_copy_1 = nx.MultiDiGraph()
@@ -618,6 +630,6 @@ class RandomGraphManager(GraphManager):
         # Restore random state again
         random.setstate(current_state)
 
-        print("[INFO] end call RandomGraphManager::_copy_graph_and_insert_pragmas")
+        print("[INFO] End call RandomGraphManager::_copy_graph_and_insert_pragmas")
 
 

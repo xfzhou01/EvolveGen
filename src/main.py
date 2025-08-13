@@ -3,6 +3,7 @@ from vitis_hls_compiler import VitisHLSCompiler
 from miter_generator import MiterGenerator
 from yosys_compiler import YosysCompiler
 from kairos_pre_processor import KairosPreprocessor
+from banditGen import HLSBanditFuzz
 import os
 import sys
 import argparse
@@ -23,6 +24,8 @@ def main():
     parser.add_argument('--skip-compilation', action='store_true', help='Skip Vitis HLS compilation step')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
     parser.add_argument('--action-count', '-a', type=int, default=20, help='Max number of actions')
+    parser.add_argument('--bandit-fuzz', action='store_true', help='Enable BanditFuzz mode for performance optimization')
+    parser.add_argument('--bandit-iterations', type=int, default=100, help='Number of BanditFuzz iterations (default: 100)')
     
     args = parser.parse_args()
     
@@ -37,12 +40,25 @@ def main():
     cpp_file_2_path = os.path.join(args.output_dir, f"benchmark_2.cpp")
     
     try:
-        # Step 1: Generate random graph
+        # Check if BanditFuzz mode is enabled
+        if args.bandit_fuzz:
+            print(f"[INFO] Starting BanditFuzz mode with {args.bandit_iterations} iterations...")
+            bandit_fuzzer = HLSBanditFuzz(
+                output_dir=args.output_dir,
+                seed=args.seed,
+                verbose=args.verbose
+            )
+            bandit_fuzzer.max_iter = args.bandit_iterations
+            bandit_fuzzer.fuzz()
+            print("[INFO] BanditFuzz completed successfully")
+            return 0
+
+        # Original workflow: Generate random graph
         print(f"[INFO] Generating random graph with seed {args.seed}...")
         action_count = args.action_count
         graph_manager = RandomGraphManager(seed=args.seed)
-        
-        
+
+
         success = graph_manager.generate_random_graph(action_number_total=action_count)
         if not success:
             print("[ERROR] Failed to generate random graph")

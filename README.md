@@ -10,7 +10,8 @@ This project generates benchmarks for High-Level Synthesis (HLS) model checking 
 - **Pragma Insertion**: Automatically inserts different HLS optimization pragmas to create functionally equivalent but differently optimized designs
 - **HLS Compilation**: Compiles C++ code to Verilog using Xilinx Vitis HLS
 - **Miter Generation**: Creates miter circuits for equivalence checking between two HLS implementations
-- **AIGER Output**: Converts miter circuits to AIGER format for model checking tools
+- **BTOR2 Output**: Converts miter circuits to BTOR2 format for SMT solvers
+- **BanditFuzz**: Multi-agent reinforcement learning for performance-driven fuzzing
 - **Configurable Parameters**: Supports customization of seeds, output directories, clock periods, and more
 
 ## Requirements
@@ -25,7 +26,9 @@ This project generates benchmarks for High-Level Synthesis (HLS) model checking 
 - **Xilinx Vitis HLS** - Required for C++ to HDL synthesis
   - Must be installed and `vitis_hls` command available in PATH
 - **Yosys** - Open-source synthesis tool for Verilog processing
-  - Used for flattening and AIGER conversion
+  - Used for flattening and BTOR2 conversion
+- **Bitwuzla** - SMT solver for BTOR2 verification
+- **SMT-Sweeper** - Alternative SMT solver for performance comparison
 - **clang-format** (optional) - For C++ code formatting
 
 ## Installation
@@ -67,8 +70,10 @@ python src/main.py [OPTIONS]
 - `--cpp-file FILE` - Name of C++ output file (default: benchmark.cpp)
 - `--project-name NAME` - HLS project name (default: hls_benchmark)
 - `--top-function NAME` - Top-level function name (default: top)
-- `--clock-period NS` - Clock period in nanoseconds (default: 10)
+- `--action-count COUNT` - Number of graph generation actions (default: 20)
 - `--skip-compilation` - Skip Vitis HLS compilation step
+- `--bandit-fuzz` - Enable BanditFuzz mode for performance optimization
+- `--bandit-iterations N` - Number of BanditFuzz iterations (default: 100)
 - `--verbose, -v` - Enable verbose output
 
 ### Examples
@@ -86,6 +91,16 @@ python src/main.py [OPTIONS]
 3. **Custom project settings:**
    ```bash
    python src/main.py --project-name my_project --top-function compute --clock-period 5
+   ```
+
+4. **Run BanditFuzz for performance optimization:**
+   ```bash
+   python src/main.py --bandit-fuzz --bandit-iterations 50 --verbose
+   ```
+
+5. **Test BanditFuzz learning:**
+   ```bash
+   python test_bandit_learning.py
    ```
 
 ## Output Structure
@@ -109,16 +124,23 @@ output/
     ├── merged_1.v          # Merged Verilog from first implementation
     ├── merged_2.v          # Merged Verilog from second implementation
     ├── miter.v             # Generated miter circuit
-    └── miter.aig           # AIGER format output
+    └── miter.btor2         # BTOR2 format output
 ```
 
 ## Workflow
 
+### Standard Mode
 1. **Graph Generation**: Creates a random computation graph with nodes representing operations, arrays, loops, and branches
 2. **C++ Generation**: Converts the graph to two functionally equivalent C++ programs with different optimization pragmas
 3. **HLS Compilation**: Compiles both C++ programs to Verilog using Vitis HLS
 4. **Miter Creation**: Merges the Verilog files and creates a miter circuit for equivalence checking
-5. **AIGER Export**: Converts the miter to AIGER format for use with model checking tools
+5. **BTOR2 Export**: Converts the miter to BTOR2 format for SMT solver verification
+
+### BanditFuzz Mode
+1. **Multi-Agent Learning**: Uses Thompson Sampling with two agents (strategy and action selection)
+2. **Performance-Driven Generation**: Iteratively generates benchmarks to maximize solver performance differences
+3. **Adaptive Optimization**: Learns which graph mutations and strategies produce better results
+4. **Continuous Improvement**: Updates agent parameters based on solver performance feedback
 
 ## Architecture
 
@@ -127,6 +149,8 @@ The project consists of several key modules:
 - `main.py` - Command-line interface and workflow orchestration
 - `random_graph_manager.py` - Random computation graph generation
 - `graph_manager.py` - Base graph management and C++ code generation
+- `banditGen.py` - BanditFuzz multi-agent reinforcement learning implementation
+- `agents/thompson.py` - Thompson Sampling agent for action selection
 - `vitis_hls_compiler.py` - Vitis HLS compilation interface
 - `miter_generator.py` - Miter circuit creation
 - `yosys_compiler.py` - Yosys tool interface for Verilog processing
