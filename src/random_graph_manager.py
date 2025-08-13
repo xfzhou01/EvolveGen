@@ -478,7 +478,7 @@ class RandomGraphManager(GraphManager):
 
     def _generate_random_graph(self, action_number_total = 20):
         """
-        Generate a random graph by performing 100 random actions.
+        Generate a random graph by performing specified number of random actions.
         Each action adds a different type of node or operation to the graph.
         """
         self._reset_all()

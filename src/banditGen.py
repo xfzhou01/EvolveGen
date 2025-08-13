@@ -129,37 +129,51 @@ class HLSBanditFuzz:
 	def _compile_with_hls(self, cpp_files):
 		"""使用HLS编译器编译C++代码"""
 		try:
-			verilog_files = []
+			# 返回分组的Verilog文件，而不是混合列表
+			verilog_files_groups = []
 			for i, cpp_file in enumerate(cpp_files, 1):
 				project_name = f"hls_project_{i}"
+
+				# 使用不同的时钟周期，就像正常流程一样
+				if i == 1:
+					clock_period = self.graph_manager.cp_1
+				elif i == 2:
+					clock_period = self.graph_manager.cp_2
+				else:
+					clock_period = 10  # 默认值
+
 				result = self.hls_compiler.compile(
 					project_name=project_name,
 					top_name="top",
+					clock_period=clock_period,
 					cpp_file_list=[cpp_file]
 				)
 				if result["success"]:
-					verilog_files.extend(result["verilog_files"])
+					verilog_files_groups.append(result["verilog_files"])
 				else:
 					return None
-			return verilog_files
+			return verilog_files_groups
 		except Exception as e:
 			if self.verbose:
 				print(f"HLS compilation failed: {e}")
 			return None
 
-	def _generate_miter_circuit(self, verilog_files):
+	def _generate_miter_circuit(self, verilog_files_groups):
 		"""生成Miter电路"""
 		try:
-			# 需要至少两个Verilog文件进行比较
-			if len(verilog_files) < 2:
+			# verilog_files_groups现在是一个列表的列表
+			if len(verilog_files_groups) < 2:
 				if self.verbose:
-					print("Need at least 2 Verilog files for miter generation")
+					print("Need at least 2 groups of Verilog files for miter generation")
 				return None
 
-			# 分组Verilog文件（假设前一半是第一个设计，后一半是第二个设计）
-			mid = len(verilog_files) // 2
-			verilog_files_1 = verilog_files[:mid] if mid > 0 else [verilog_files[0]]
-			verilog_files_2 = verilog_files[mid:] if mid > 0 else [verilog_files[1]]
+			# 使用第一组和第二组Verilog文件
+			verilog_files_1 = verilog_files_groups[0]
+			verilog_files_2 = verilog_files_groups[1]
+
+			if self.verbose:
+				print(f"[DEBUG] Group 1 Verilog files: {verilog_files_1}")
+				print(f"[DEBUG] Group 2 Verilog files: {verilog_files_2}")
 
 			# 创建MiterGenerator
 			merged_verilog_folder = os.path.join(self.output_dir, "merged_verilog")
