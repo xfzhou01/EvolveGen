@@ -15,8 +15,9 @@ class HLSBanditFuzz:
 
 		# BanditFuzz components
 		self.actions = self.graph_manager.bandit_action_list
-		self.action_agent = ThompsonSampling(n_actions=len(self.actions))
-		self.strategy_agent = ThompsonSampling(n_actions=2)  # Generate new graph vs. Mutate existing graph
+		# Use more conservative parameters to encourage balanced exploration
+		self.action_agent = ThompsonSampling(n_actions=len(self.actions), decay=0.99, initial_alpha=5, initial_beta=5)
+		self.strategy_agent = ThompsonSampling(n_actions=2, decay=0.99, initial_alpha=5, initial_beta=5)  # Generate new graph vs. Mutate existing graph
 
 		# State management
 		self.best_graph = None

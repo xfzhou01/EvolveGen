@@ -1,18 +1,19 @@
 import numpy as np
 class ThompsonSampling:
-	def __init__(self,n_actions,decay=0.95):
+	def __init__(self,n_actions,decay=0.99,initial_alpha=5,initial_beta=5):
 		self.n_it = 0
 		self.n_actions = n_actions
 		self.k = 1
 		self.action = None
-		self.alpha_beta = [[1,1] for i in range(self.n_actions)]
-		self.decay = decay
+		# Use more conservative initial parameters to encourage exploration
+		self.alpha_beta = [[initial_alpha,initial_beta] for _ in range(self.n_actions)]
+		self.decay = decay  # Higher decay factor to preserve more historical information
 
 	def select_action(self):
 		samples = [0] * self.n_actions
 		for a in range(self.n_actions):
-			for i in range(self.k):
-				samples[a]  += np.random.beta(self.alpha_beta[a][0],self.alpha_beta[a][1])				
+			for _ in range(self.k):
+				samples[a]  += np.random.beta(self.alpha_beta[a][0],self.alpha_beta[a][1])
 		self.action = np.argmax(samples)
 		return self.action
 	

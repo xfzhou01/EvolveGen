@@ -268,7 +268,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Test BanditFuzz learning process')
-    parser.add_argument('--iterations', type=int, default=10, help='Number of iterations to run')
+    parser.add_argument('--iterations', type=int, default=3, help='Number of iterations to run')
     parser.add_argument('--full-pipeline', action='store_true',
                        help='Run full HLS pipeline (generates btor2 files, but slower)')
     parser.add_argument('--verbose', action='store_true', default=True, help='Verbose output')
