@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-测试BanditFuzz HLS基准生成器的简化脚本
+Simplified scripts for testing BanditFuzz HLS benchmark generator
 """
 
 import sys
@@ -10,25 +10,25 @@ sys.path.append('src')
 from banditGen import HLSBanditFuzz
 
 def test_bandit_fuzz():
-    """测试BanditFuzz功能"""
+    """Test the BanditFuzz function"""
     print("[INFO] Testing HLS BanditFuzz...")
     
-    # 创建输出目录
+    # Create an output directory
     output_dir = "./test_output"
     os.makedirs(output_dir, exist_ok=True)
     
-    # 初始化BanditFuzz
+    # Initialize BanditFuzz
     bandit_fuzzer = HLSBanditFuzz(
         output_dir=output_dir,
         seed=123,
         verbose=True
     )
     
-    # 设置较少的迭代次数用于测试
+    # Set fewer iterations for testing
     bandit_fuzzer.max_iter = 5
     
     try:
-        # 运行BanditFuzz
+        # Run BanditFuzz
         bandit_fuzzer.fuzz()
         print("[SUCCESS] BanditFuzz test completed")
         return True

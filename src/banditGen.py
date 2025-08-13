@@ -7,24 +7,24 @@ from yosys_compiler import YosysCompiler
 
 class HLSBanditFuzz:
 	def __init__(self, output_dir="./output", seed=42, verbose=False):
-		# HLS工具链组件
+		# HLS toolchain components
 		self.graph_manager = RandomGraphManager(seed=seed)
 		self.hls_compiler = VitisHLSCompiler(working_dir=output_dir)
 		self.yosys_compiler = YosysCompiler()
-		# MiterGenerator将在需要时动态创建
+		# MiterGenerator will be created dynamically when needed
 
-		# BanditFuzz组件
+		# BanditFuzz components
 		self.actions = self.graph_manager.bandit_action_list
 		self.action_agent = ThompsonSampling(n_actions=len(self.actions))
-		self.strategy_agent = ThompsonSampling(n_actions=2)  # 生成新图 vs 变异现有图
+		self.strategy_agent = ThompsonSampling(n_actions=2)  # Generate new graph vs. Mutate existing graph
 
-		# 状态管理
+		# State management
 		self.best_graph = None
-		self.best_performance_margin = float('-inf')  # 目标是最大化性能差异
+		self.best_performance_margin = float('-inf')  # Goal is to maximize performance difference
 		self.max_iter = 1000
 		self.verbose = verbose
 
-		# 路径配置
+		# Path configuration
 		self.output_dir = output_dir
 		self.btor2_output_dir = os.path.join(output_dir, "btor2")
 		self.generate_dir = "./generate"
@@ -34,11 +34,11 @@ class HLSBanditFuzz:
 
 	def run_hls_pipeline_and_evaluate(self, graph):
 		"""
-		运行完整的HLS流程并评估性能差异
-		返回: (performance_margin, success)
+		Runs the complete HLS flow and evaluates performance difference.
+		Returns: (performance_margin, success)
 		"""
 		try:
-			# 1. 生成C++代码
+			# 1. Generate C++ code
 			if self.verbose:
 				print("[DEBUG] Step 1: Generating C++ code...")
 			cpp_files = self._generate_cpp_from_graph(graph)
@@ -47,7 +47,7 @@ class HLSBanditFuzz:
 					print("[ERROR] Step 1 failed: C++ generation")
 				return float('-inf'), False
 
-			# 2. HLS编译生成Verilog
+			# 2. HLS compilation to generate Verilog
 			if self.verbose:
 				print("[DEBUG] Step 2: HLS compilation...")
 			verilog_files = self._compile_with_hls(cpp_files)
@@ -56,7 +56,7 @@ class HLSBanditFuzz:
 					print("[ERROR] Step 2 failed: HLS compilation")
 				return float('-inf'), False
 
-			# 3. 生成Miter电路
+			# 3. Generate Miter circuit
 			if self.verbose:
 				print("[DEBUG] Step 3: Miter generation...")
 			miter_file = self._generate_miter_circuit(verilog_files)
@@ -65,7 +65,7 @@ class HLSBanditFuzz:
 					print("[ERROR] Step 3 failed: Miter generation")
 				return float('-inf'), False
 
-			# 4. 转换为BTOR2格式
+			# 4. Convert to BTOR2 format
 			if self.verbose:
 				print("[DEBUG] Step 4: BTOR2 conversion...")
 			btor2_file = self._convert_to_btor2(miter_file)
@@ -74,13 +74,13 @@ class HLSBanditFuzz:
 					print("[ERROR] Step 4 failed: BTOR2 conversion")
 				return float('-inf'), False
 
-			# 5. 运行双求解器测试
+			# 5. Run dual solver test
 			if self.verbose:
 				print("[DEBUG] Step 5: Running solvers...")
 			smt_sweeper_time = self._run_smt_sweeper(btor2_file)
 			bitwuzla_time = self._run_bitwuzla(btor2_file)
 
-			# 6. 计算性能差异 (目标: bitwuzla慢, smt-sweeper快)
+			# 6. Calculate performance difference (Goal: bitwuzla slow, smt-sweeper fast)
 			performance_margin = bitwuzla_time - smt_sweeper_time
 
 			if self.verbose:
@@ -98,19 +98,19 @@ class HLSBanditFuzz:
 			return float('-inf'), False
 
 	def _generate_cpp_from_graph(self, graph):
-		"""从图生成C++代码"""
+		"""Generates C++ code from the graph"""
 		try:
-			# 设置图管理器的图
+			# Set the graph for the graph manager
 			self.graph_manager.program_graph = graph
 
-			# 生成两个版本的C++代码用于比较
+			# Generate two versions of C++ code for comparison
 			cpp_file_1 = os.path.join(self.output_dir, "benchmark_1.cpp")
 			cpp_file_2 = os.path.join(self.output_dir, "benchmark_2.cpp")
 
-			# 使用dump_cpp_comparsion方法生成两个版本
+			# Use dump_cpp_comparsion method to generate two versions
 			self.graph_manager.dump_cpp_comparsion(cpp_file_1, cpp_file_2)
 
-			# 检查文件是否真的生成了
+			# Check if files were actually generated
 			if os.path.exists(cpp_file_1) and os.path.exists(cpp_file_2):
 				if self.verbose:
 					print(f"[DEBUG] C++ files generated: {cpp_file_1}, {cpp_file_2}")
@@ -127,20 +127,20 @@ class HLSBanditFuzz:
 			return None
 
 	def _compile_with_hls(self, cpp_files):
-		"""使用HLS编译器编译C++代码"""
+		"""Compiles C++ code using the HLS compiler"""
 		try:
-			# 返回分组的Verilog文件，而不是混合列表
+			# Return grouped Verilog files, not a mixed list
 			verilog_files_groups = []
 			for i, cpp_file in enumerate(cpp_files, 1):
 				project_name = f"hls_project_{i}"
 
-				# 使用不同的时钟周期，就像正常流程一样
+				# Use different clock periods, as in the normal flow
 				if i == 1:
 					clock_period = self.graph_manager.cp_1
 				elif i == 2:
 					clock_period = self.graph_manager.cp_2
 				else:
-					clock_period = 10  # 默认值
+					clock_period = 10  # Default value
 
 				result = self.hls_compiler.compile(
 					project_name=project_name,
@@ -159,15 +159,15 @@ class HLSBanditFuzz:
 			return None
 
 	def _generate_miter_circuit(self, verilog_files_groups):
-		"""生成Miter电路"""
+		"""Generates the Miter circuit"""
 		try:
-			# verilog_files_groups现在是一个列表的列表
+			# verilog_files_groups is now a list of lists
 			if len(verilog_files_groups) < 2:
 				if self.verbose:
 					print("Need at least 2 groups of Verilog files for miter generation")
 				return None
 
-			# 使用第一组和第二组Verilog文件
+			# Use the first and second groups of Verilog files
 			verilog_files_1 = verilog_files_groups[0]
 			verilog_files_2 = verilog_files_groups[1]
 
@@ -175,7 +175,7 @@ class HLSBanditFuzz:
 				print(f"[DEBUG] Group 1 Verilog files: {verilog_files_1}")
 				print(f"[DEBUG] Group 2 Verilog files: {verilog_files_2}")
 
-			# 创建MiterGenerator
+			# Create MiterGenerator
 			merged_verilog_folder = os.path.join(self.output_dir, "merged_verilog")
 			os.makedirs(merged_verilog_folder, exist_ok=True)
 
@@ -186,10 +186,10 @@ class HLSBanditFuzz:
 				top_name="top"
 			)
 
-			# 生成Miter电路，返回的是top模块名称
+			# Generate Miter circuit, returns the top module name
 			kairos_top = miter_generator.generate_miter()
 
-			# 返回包含miter.v文件的目录路径
+			# Return the directory path containing the miter.v file
 			if self.verbose:
 				print(f"[DEBUG] Miter generation completed. Top module: {kairos_top}")
 				print(f"[DEBUG] Miter directory: {merged_verilog_folder}")
@@ -204,10 +204,10 @@ class HLSBanditFuzz:
 			return None
 
 	def _convert_to_btor2(self, miter_file):
-		"""将Miter电路转换为BTOR2格式"""
+		"""Converts the Miter circuit to BTOR2 format"""
 		try:
-			# miter_file应该是一个目录路径，包含miter.v文件
-			# 如果miter_file是文件路径，我们需要获取其目录
+			# miter_file should be a directory path containing the miter.v file
+			# If miter_file is a file path, we need to get its directory
 			if os.path.isfile(miter_file):
 				input_dir = os.path.dirname(miter_file)
 			else:
@@ -217,7 +217,7 @@ class HLSBanditFuzz:
 				print(f"[DEBUG] Input directory for BTOR2 conversion: {input_dir}")
 				print(f"[DEBUG] Files in input directory: {os.listdir(input_dir) if os.path.exists(input_dir) else 'Directory not found'}")
 
-			# 调用转换脚本，使用正确的参数格式
+			# Call the conversion script with the correct parameter format
 			cmd = [
 				"python3",
 				"script/miter_to_btor.py",
@@ -236,12 +236,12 @@ class HLSBanditFuzz:
 				print(f"[DEBUG] BTOR2 conversion return code: {result.returncode}")
 
 			if result.returncode == 0:
-				# 检查生成的BTOR2文件
+				# Check the generated BTOR2 file
 				btor2_file = os.path.join(self.btor2_output_dir, "miter.btor2")
 				if os.path.exists(btor2_file):
 					return btor2_file
 				else:
-					# 查找任何.btor2文件
+					# Look for any .btor2 file
 					btor2_files = glob.glob(os.path.join(self.btor2_output_dir, "*.btor2"))
 					if btor2_files:
 						return btor2_files[0]
@@ -261,7 +261,7 @@ class HLSBanditFuzz:
 			return None
 
 	def _run_smt_sweeper(self, btor2_file):
-		"""运行SMT-Sweeper求解器 (Reference Solver - 期望快)"""
+		"""Runs SMT-Sweeper solver (Reference Solver - expected to be fast)"""
 		try:
 			cmd = [
 				"./solver/smt-sweeper",
@@ -278,7 +278,7 @@ class HLSBanditFuzz:
 			solve_time = end_time - start_time
 
 			if result.returncode == 0:
-				# 保存生成的SMT文件到generate目录
+				# Save the generated SMT file to the generate directory
 				if result.stdout:
 					timestamp = int(time.time() * 1000000)
 					smt_file = os.path.join(self.generate_dir, f"{timestamp}.smt2")
@@ -286,24 +286,24 @@ class HLSBanditFuzz:
 						f.write(result.stdout)
 				return solve_time
 			else:
-				return float('inf')  # 求解失败
+				return float('inf')  # Solving failed
 
 		except subprocess.TimeoutExpired:
-			return float('inf')  # 超时
+			return float('inf')  # Timeout
 		except Exception as e:
 			if self.verbose:
 				print(f"SMT-Sweeper failed: {e}")
 			return float('inf')
 
 	def _run_bitwuzla(self, btor2_file):
-		"""运行Bitwuzla求解器 (Target Solver - 期望慢)"""
+		"""Runs Bitwuzla solver (Target Solver - expected to be slow)"""
 		try:
-			# 找到最新生成的SMT文件
+			# Find the most recently generated SMT file
 			latest_smt_file = self._get_latest_smt_file()
 			if not latest_smt_file:
 				if self.verbose:
 					print(f"No SMT file found for Bitwuzla, using BTOR2 file: {btor2_file}")
-				# 如果没有SMT文件，直接使用BTOR2文件
+				# If no SMT file, use the BTOR2 file directly
 				latest_smt_file = btor2_file
 
 			cmd = [
@@ -325,19 +325,19 @@ class HLSBanditFuzz:
 		except subprocess.TimeoutExpired:
 			if self.verbose:
 				print("Bitwuzla timeout")
-			return float('inf')  # 超时
+			return float('inf')  # Timeout
 		except Exception as e:
 			if self.verbose:
 				print(f"Bitwuzla failed: {e}")
 			return float('inf')
 
 	def _get_latest_smt_file(self):
-		"""获取generate目录中最新的SMT文件"""
+		"""Gets the latest SMT file in the generate directory"""
 		try:
-			# 简化版本的文件查找
+			# Simplified version of file lookup
 			smt_files = glob.glob(os.path.join(self.generate_dir, "*.smt2"))
 			if smt_files:
-				# 按修改时间排序，返回最新的
+				# Sort by modification time, return the latest
 				latest_file = max(smt_files, key=os.path.getmtime)
 				return latest_file
 			return None
@@ -345,10 +345,10 @@ class HLSBanditFuzz:
 			return None
 
 	def fuzz(self):
-		"""主要的BanditFuzz模糊测试循环"""
+		"""Main BanditFuzz fuzzing loop"""
 		print("[INFO] Starting HLS BanditFuzz...")
 
-		# 生成初始图
+		# Generate initial graph
 		print("[INFO] Generating initial graph...")
 		success = self.graph_manager.generate_random_graph(action_number_total=20)
 		if not success:
@@ -364,36 +364,36 @@ class HLSBanditFuzz:
 
 		print(f"[INFO] Initial performance margin: {self.best_performance_margin:.3f}")
 
-		# 主循环
+		# Main loop
 		for iteration in range(1, self.max_iter + 1):
 			print(f"\n[INFO] Iteration {iteration}/{self.max_iter}")
 
-			# 智能体2决定策略: 0=生成新图, 1=变异现有图
+			# Agent 2 decides strategy: 0=Generate new graph, 1=Mutate existing graph
 			strategy = self.strategy_agent.select_action()
 
-			if strategy == 0:  # 生成新图
+			if strategy == 0:  # Generate new graph
 				print("[INFO] Generating new graph...")
 				success = self.graph_manager.generate_random_graph(action_number_total=20)
 				if success:
 					new_graph = copy.deepcopy(self.graph_manager.program_graph)
 				else:
 					continue
-			else:  # 变异现有图
+			else:  # Mutate existing graph
 				print("[INFO] Mutating existing graph...")
 				action_idx = self.action_agent.select_action()
 				new_graph = self._mutate_graph(self.best_graph, action_idx)
 
-			# 评估新图
+			# Evaluate the new graph
 			performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
 
 			if not success:
-				# 评估失败，给负奖励
+				# Evaluation failed, give negative reward
 				self.strategy_agent.reward(False)
-				if strategy == 1:  # 只有变异时才奖励动作智能体
+				if strategy == 1:  # Only reward action agent if mutation
 					self.action_agent.reward(False)
 				continue
 
-			# 检查是否改进
+			# Check for improvement
 			improved = performance_margin > self.best_performance_margin
 
 			if improved:
@@ -401,12 +401,12 @@ class HLSBanditFuzz:
 				self.best_graph = new_graph
 				self.best_performance_margin = performance_margin
 
-				# 保存最佳图
+				# Save best graph
 				self._save_best_graph()
 
-			# 奖励智能体
+			# Reward agents
 			self.strategy_agent.reward(improved)
-			if strategy == 1:  # 只有变异时才奖励动作智能体
+			if strategy == 1:  # Only reward action agent if mutation
 				self.action_agent.reward(improved)
 
 			print(f"[INFO] Current margin: {performance_margin:.3f}, Best: {self.best_performance_margin:.3f}")
@@ -414,12 +414,12 @@ class HLSBanditFuzz:
 		print(f"\n[INFO] BanditFuzz completed. Best performance margin: {self.best_performance_margin:.3f}")
 
 	def _mutate_graph(self, base_graph, action_idx):
-		"""变异图结构"""
+		"""Mutates the graph structure"""
 		try:
-			# 复制基础图
+			# Copy the base graph
 			self.graph_manager.program_graph = copy.deepcopy(base_graph)
 
-			# 执行选定的动作
+			# Execute the selected action
 			action = self.actions[action_idx]
 			action()
 
@@ -430,7 +430,7 @@ class HLSBanditFuzz:
 			return base_graph
 
 	def _save_best_graph(self):
-		"""保存最佳图的信息"""
+		"""Saves information about the best graph"""
 		try:
 			best_info = {
 				"performance_margin": self.best_performance_margin,
