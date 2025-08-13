@@ -1,4 +1,4 @@
-import os, glob, random, time, uuid, subprocess, copy
+import os, glob, time, subprocess, copy
 from agents import ThompsonSampling
 from random_graph_manager import RandomGraphManager
 from vitis_hls_compiler import VitisHLSCompiler
@@ -23,6 +23,12 @@ class HLSBanditFuzz:
 		self.best_performance_margin = float('-inf')  # Goal is to maximize performance difference
 		self.max_iter = 1000
 		self.verbose = verbose
+
+		# Incremental mutation state
+		self.current_working_graph = None  # Current graph being mutated
+		self.mutation_history = []  # Track applied actions for debugging
+		self.stagnation_counter = 0  # Count iterations without improvement
+		self.max_stagnation = 10  # Reset working graph after this many stagnant iterations
 
 		# Path configuration
 		self.output_dir = output_dir
@@ -404,6 +410,9 @@ class HLSBanditFuzz:
 
 		print(f"[INFO] Initial performance margin: {self.best_performance_margin:.3f}")
 
+		# Initialize working graph for incremental mutation
+		self.current_working_graph = copy.deepcopy(self.best_graph)
+
 		# Main loop
 		for iteration in range(1, self.max_iter + 1):
 			print(f"\n[INFO] Iteration {iteration}/{self.max_iter}")
@@ -416,12 +425,26 @@ class HLSBanditFuzz:
 				success = self.graph_manager.generate_random_graph(action_number_total=20)
 				if success:
 					new_graph = copy.deepcopy(self.graph_manager.program_graph)
+					# Reset working graph when generating new graph
+					self._reset_working_graph()
 				else:
 					continue
-			else:  # Mutate existing graph
-				print("[INFO] Mutating existing graph...")
+			else:  # Incremental mutation of working graph
+				print("[INFO] Incrementally mutating working graph...")
+
+				# Check if we should reset due to stagnation
+				if self.stagnation_counter >= self.max_stagnation:
+					print(f"[INFO] Resetting working graph due to stagnation ({self.stagnation_counter} iterations)")
+					self._reset_working_graph()
+
 				action_idx = self.action_agent.select_action()
-				new_graph = self._mutate_graph(self.best_graph, action_idx)
+				new_graph = self._mutate_graph_incremental(action_idx)
+
+				if self.verbose:
+					print(f"[DEBUG] Mutation history length: {len(self.mutation_history)}")
+					if self.mutation_history:
+						recent_actions = [h['action_name'] for h in self.mutation_history[-3:]]
+						print(f"[DEBUG] Recent actions: {recent_actions}")
 
 			# Evaluate the new graph
 			performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
@@ -441,8 +464,22 @@ class HLSBanditFuzz:
 				self.best_graph = new_graph
 				self.best_performance_margin = performance_margin
 
+				# Reset stagnation counter on improvement
+				self.stagnation_counter = 0
+
+				# Update working graph to the new best graph for future mutations
+				if strategy == 1:  # Only update working graph if this was a mutation
+					self.current_working_graph = copy.deepcopy(new_graph)
+					if self.verbose:
+						print(f"[DEBUG] Updated working graph to new best. Mutation history preserved.")
+
 				# Save best graph
 				self._save_best_graph()
+			else:
+				# Increment stagnation counter
+				self.stagnation_counter += 1
+				if self.verbose:
+					print(f"[DEBUG] No improvement. Stagnation counter: {self.stagnation_counter}/{self.max_stagnation}")
 
 			# Reward agents
 			self.strategy_agent.reward(improved)
@@ -450,11 +487,87 @@ class HLSBanditFuzz:
 				self.action_agent.reward(improved)
 
 			print(f"[INFO] Current margin: {performance_margin:.3f}, Best: {self.best_performance_margin:.3f}")
+			if strategy == 1 and self.verbose:
+				print(f"[INFO] Working graph mutations applied: {len(self.mutation_history)}")
+
+			# Print detailed mutation summary every 10 iterations
+			if iteration % 10 == 0:
+				self._print_mutation_summary()
 
 		print(f"\n[INFO] BanditFuzz completed. Best performance margin: {self.best_performance_margin:.3f}")
 
+		# Final summary
+		print(f"[INFO] Final mutation summary:")
+		print(f"  Total mutations in best path: {len(self.mutation_history)}")
+		print(f"  Final stagnation counter: {self.stagnation_counter}")
+		self._save_mutation_history()
+
+	def _mutate_graph_incremental(self, action_idx):
+		"""
+		Incrementally mutates the current working graph.
+		This implements true incremental mutation as described in BanditFuzz paper.
+		"""
+		try:
+			# Use current working graph as base
+			if self.current_working_graph is None:
+				# Initialize working graph from best graph
+				self.current_working_graph = copy.deepcopy(self.best_graph)
+				self.mutation_history = []
+				if self.verbose:
+					print("[DEBUG] Initialized working graph from best graph")
+
+			# Set the working graph in graph manager
+			self.graph_manager.program_graph = copy.deepcopy(self.current_working_graph)
+
+			# Execute the selected action
+			action = self.actions[action_idx]
+			action_name = action.__name__ if hasattr(action, '__name__') else f"action_{action_idx}"
+
+			if self.verbose:
+				print(f"[DEBUG] Applying action: {action_name}")
+
+			success = action()
+
+			if success:
+				# Update working graph with the mutation result
+				self.current_working_graph = copy.deepcopy(self.graph_manager.program_graph)
+
+				# Track mutation history
+				self.mutation_history.append({
+					'action_idx': action_idx,
+					'action_name': action_name,
+					'iteration': len(self.mutation_history) + 1
+				})
+
+				if self.verbose:
+					print(f"[DEBUG] Mutation successful. History length: {len(self.mutation_history)}")
+
+				return self.current_working_graph
+			else:
+				if self.verbose:
+					print(f"[DEBUG] Action {action_name} failed, returning unchanged graph")
+				return self.current_working_graph
+
+		except Exception as e:
+			if self.verbose:
+				print(f"Incremental mutation failed: {e}")
+				import traceback
+				traceback.print_exc()
+			return self.current_working_graph if self.current_working_graph is not None else self.best_graph
+
+	def _reset_working_graph(self):
+		"""Reset working graph to best graph and clear mutation history"""
+		self.current_working_graph = copy.deepcopy(self.best_graph)
+		self.mutation_history = []
+		self.stagnation_counter = 0
+		if self.verbose:
+			print("[DEBUG] Reset working graph to best graph")
+
 	def _mutate_graph(self, base_graph, action_idx):
-		"""Mutates the graph structure"""
+		"""
+		Legacy mutation method - kept for compatibility.
+		This method is now deprecated in favor of incremental mutation.
+		"""
 		try:
 			# Copy the base graph
 			self.graph_manager.program_graph = copy.deepcopy(base_graph)
@@ -476,14 +589,57 @@ class HLSBanditFuzz:
 				"performance_margin": self.best_performance_margin,
 				"graph_nodes": self.best_graph.number_of_nodes(),
 				"graph_edges": self.best_graph.number_of_edges(),
+				"mutation_history_length": len(self.mutation_history),
+				"stagnation_counter": self.stagnation_counter
 			}
 
 			info_file = os.path.join(self.output_dir, "best_graph_info.txt")
 			with open(info_file, 'w') as f:
 				for key, value in best_info.items():
 					f.write(f"{key}: {value}\n")
+
+			# Save detailed mutation history
+			self._save_mutation_history()
 		except Exception as e:
 			if self.verbose:
 				print(f"Failed to save best graph info: {e}")
+
+	def _save_mutation_history(self):
+		"""Save detailed mutation history for analysis"""
+		try:
+			history_file = os.path.join(self.output_dir, "mutation_history.txt")
+			with open(history_file, 'w') as f:
+				f.write(f"Best Performance Margin: {self.best_performance_margin:.3f}\n")
+				f.write(f"Total Mutations Applied: {len(self.mutation_history)}\n")
+				f.write(f"Current Stagnation Counter: {self.stagnation_counter}\n")
+				f.write("=" * 50 + "\n")
+				f.write("Mutation History:\n")
+
+				for i, mutation in enumerate(self.mutation_history, 1):
+					f.write(f"{i:3d}. Action {mutation['action_idx']:2d}: {mutation['action_name']}\n")
+
+				if not self.mutation_history:
+					f.write("No mutations applied yet.\n")
+
+		except Exception as e:
+			if self.verbose:
+				print(f"Failed to save mutation history: {e}")
+
+	def _print_mutation_summary(self):
+		"""Print a summary of current mutation state"""
+		if self.verbose:
+			print(f"\n[MUTATION SUMMARY]")
+			print(f"  Working graph nodes: {self.current_working_graph.number_of_nodes() if self.current_working_graph else 'N/A'}")
+			print(f"  Working graph edges: {self.current_working_graph.number_of_edges() if self.current_working_graph else 'N/A'}")
+			print(f"  Best graph nodes: {self.best_graph.number_of_nodes() if self.best_graph else 'N/A'}")
+			print(f"  Best graph edges: {self.best_graph.number_of_edges() if self.best_graph else 'N/A'}")
+			print(f"  Mutations applied: {len(self.mutation_history)}")
+			print(f"  Stagnation counter: {self.stagnation_counter}/{self.max_stagnation}")
+
+			if self.mutation_history:
+				recent_count = min(3, len(self.mutation_history))
+				recent_actions = [h['action_name'] for h in self.mutation_history[-recent_count:]]
+				print(f"  Recent actions: {' -> '.join(recent_actions)}")
+			print()
 
 
