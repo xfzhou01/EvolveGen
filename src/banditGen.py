@@ -27,6 +27,7 @@ class HLSBanditFuzz:
 
 		# Incremental mutation state
 		self.current_working_graph = None  # Current graph being mutated
+		self.current_working_performance = float('-inf')  # Performance of current working graph
 		self.mutation_history = []  # Track applied actions for debugging
 		self.stagnation_counter = 0  # Count iterations without improvement
 		self.max_stagnation = 10  # Reset working graph after this many stagnant iterations
@@ -413,6 +414,7 @@ class HLSBanditFuzz:
 
 		# Initialize working graph for incremental mutation
 		self.current_working_graph = copy.deepcopy(self.best_graph)
+		self.current_working_performance = self.best_performance_margin
 
 		# Main loop
 		for iteration in range(1, self.max_iter + 1):
@@ -420,6 +422,9 @@ class HLSBanditFuzz:
 
 			# Agent 2 decides strategy: 0=Generate new graph, 1=Mutate existing graph
 			strategy = self.strategy_agent.select_action()
+
+			# Store baseline performance for reward calculation
+			baseline_performance = self.current_working_performance if strategy == 1 else self.best_performance_margin
 
 			if strategy == 0:  # Generate new graph
 				print("[INFO] Generating new graph...")
@@ -457,35 +462,51 @@ class HLSBanditFuzz:
 					self.action_agent.reward(False)
 				continue
 
-			# Check for improvement
-			improved = performance_margin > self.best_performance_margin
+			# Calculate rewards based on improvement type
+			global_improvement = performance_margin > self.best_performance_margin
+			local_improvement = performance_margin > baseline_performance
 
-			if improved:
-				print(f"[IMPROVE] New best margin: {performance_margin:.3f} (was {self.best_performance_margin:.3f})")
+			# For strategy agent: reward based on whether the chosen strategy led to any improvement
+			strategy_reward = local_improvement
+
+			# For action agent: reward based on local improvement when mutating
+			action_reward = local_improvement if strategy == 1 else False
+
+			if global_improvement:
+				print(f"[GLOBAL IMPROVE] New best margin: {performance_margin:.3f} (was {self.best_performance_margin:.3f})")
 				self.best_graph = new_graph
 				self.best_performance_margin = performance_margin
 
-				# Reset stagnation counter on improvement
+				# Reset stagnation counter on global improvement
 				self.stagnation_counter = 0
 
 				# Update working graph to the new best graph for future mutations
 				if strategy == 1:  # Only update working graph if this was a mutation
 					self.current_working_graph = copy.deepcopy(new_graph)
+					self.current_working_performance = performance_margin
 					if self.verbose:
 						print(f"[DEBUG] Updated working graph to new best. Mutation history preserved.")
 
 				# Save best graph
 				self._save_best_graph()
+			elif local_improvement and strategy == 1:
+				print(f"[LOCAL IMPROVE] Working graph improved: {performance_margin:.3f} (was {self.current_working_performance:.3f})")
+				# Update working graph even if not globally best
+				self.current_working_graph = copy.deepcopy(new_graph)
+				self.current_working_performance = performance_margin
+				# Reset stagnation counter on local improvement
+				self.stagnation_counter = 0
 			else:
-				# Increment stagnation counter
+				# Increment stagnation counter only if no improvement at all
 				self.stagnation_counter += 1
 				if self.verbose:
-					print(f"[DEBUG] No improvement. Stagnation counter: {self.stagnation_counter}/{self.max_stagnation}")
+					improvement_type = "global" if not global_improvement else "local"
+					print(f"[DEBUG] No {improvement_type} improvement. Stagnation counter: {self.stagnation_counter}/{self.max_stagnation}")
 
-			# Reward agents
-			self.strategy_agent.reward(improved)
+			# Reward agents with improved reward mechanism
+			self.strategy_agent.reward(strategy_reward)
 			if strategy == 1:  # Only reward action agent if mutation
-				self.action_agent.reward(improved)
+				self.action_agent.reward(action_reward)
 
 			print(f"[INFO] Current margin: {performance_margin:.3f}, Best: {self.best_performance_margin:.3f}")
 			if strategy == 1 and self.verbose:
@@ -559,6 +580,7 @@ class HLSBanditFuzz:
 	def _reset_working_graph(self):
 		"""Reset working graph to best graph and clear mutation history"""
 		self.current_working_graph = copy.deepcopy(self.best_graph)
+		self.current_working_performance = self.best_performance_margin
 		self.mutation_history = []
 		self.stagnation_counter = 0
 		if self.verbose:
