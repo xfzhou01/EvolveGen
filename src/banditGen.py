@@ -74,6 +74,9 @@ class HLSBanditFuzz:
 					print("[ERROR] Step 4 failed: BTOR2 conversion")
 				return float('-inf'), False
 
+			# 4.5. Fix BTOR2 file: convert output to bad for property checking
+			self._fix_btor2_output_to_bad(btor2_file)
+
 			# 5. Run dual solver test
 			if self.verbose:
 				print("[DEBUG] Step 5: Running solvers...")
@@ -343,6 +346,43 @@ class HLSBanditFuzz:
 			return None
 		except Exception:
 			return None
+
+	def _fix_btor2_output_to_bad(self, btor2_file):
+		"""Convert 'output' declarations to 'bad' in BTOR2 file for property checking"""
+		try:
+			if self.verbose:
+				print("[DEBUG] Fixing BTOR2 file: converting output to bad...")
+
+			# Read the BTOR2 file
+			with open(btor2_file, 'r') as f:
+				lines = f.readlines()
+
+			# Process each line
+			modified_lines = []
+			output_count = 0
+			for line in lines:
+				# Check if this line declares an output
+				if ' output ' in line:
+					# Convert output to bad
+					modified_line = line.replace(' output ', ' bad ')
+					modified_lines.append(modified_line)
+					output_count += 1
+					if self.verbose:
+						print(f"[DEBUG] Converted output to bad: {line.strip()} -> {modified_line.strip()}")
+				else:
+					modified_lines.append(line)
+
+			# Write back the modified content
+			with open(btor2_file, 'w') as f:
+				f.writelines(modified_lines)
+
+			if self.verbose:
+				print(f"[DEBUG] Fixed {output_count} output declarations in BTOR2 file")
+
+		except Exception as e:
+			if self.verbose:
+				print(f"[WARNING] Failed to fix BTOR2 file: {e}")
+			# Don't fail the entire pipeline for this
 
 	def fuzz(self):
 		"""Main BanditFuzz fuzzing loop"""

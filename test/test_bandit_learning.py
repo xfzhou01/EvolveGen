@@ -12,6 +12,17 @@ sys.path.append('src')
 
 from banditGen import HLSBanditFuzz
 
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for numpy types"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
 class LearningObserver:
     """Class to observe and record the learning process"""
     
@@ -115,10 +126,10 @@ class LearningObserver:
         }
         
         with open(save_path, 'w') as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, indent=2, cls=NumpyEncoder)
         print(f"Learning data saved to: {save_path}")
 
-def test_bandit_learning(max_iterations=20, verbose=True):
+def test_bandit_learning(max_iterations=20, verbose=True, run_full_pipeline=False):
     """Test the learning process of BanditFuzz"""
     print("=== BanditFuzz Learning Test ===")
     
@@ -167,14 +178,45 @@ def test_bandit_learning(max_iterations=20, verbose=True):
             strategy = bandit_fuzzer.strategy_agent.select_action()
             action_idx = bandit_fuzzer.action_agent.select_action() if strategy == 1 else -1
             
-            # Simulated performance evaluation (in practice, the complete HLS process will be run here)
-            # For testing, we simulate a performance margin
-            performance_margin = np.random.normal(-0.05, 0.02)  # Simulate performance data
-            
-            # Check for improvement
-            improved = performance_margin > bandit_fuzzer.best_performance_margin
-            
-            if improved:
+            # Choose between full pipeline or simulated evaluation
+            if run_full_pipeline:
+                # Run the complete HLS pipeline to get real performance data
+                if strategy == 0:  # Generate new graph
+                    print(f"[INFO] Generating new graph...")
+                    success = bandit_fuzzer.graph_manager.generate_random_graph(action_number_total=20)
+                    if not success:
+                        print(f"[WARNING] Failed to generate new graph in iteration {iteration}")
+                        performance_margin = float('-inf')
+                        improved = False
+                    else:
+                        current_graph = bandit_fuzzer.graph_manager.program_graph.copy()
+                        performance_margin, success = bandit_fuzzer.run_hls_pipeline_and_evaluate(current_graph)
+                        improved = success and performance_margin > bandit_fuzzer.best_performance_margin
+                        if improved:
+                            bandit_fuzzer.best_graph = current_graph
+                else:  # Mutate existing graph (strategy == 1)
+                    print(f"[INFO] Mutating existing graph with action {action_idx}...")
+                    # Apply the selected action to mutate the graph
+                    bandit_fuzzer.graph_manager.program_graph = bandit_fuzzer.best_graph.copy()
+                    action_success = bandit_fuzzer.actions[action_idx]()
+
+                    if not action_success:
+                        print(f"[WARNING] Action {action_idx} failed in iteration {iteration}")
+                        performance_margin = float('-inf')
+                        improved = False
+                    else:
+                        current_graph = bandit_fuzzer.graph_manager.program_graph.copy()
+                        performance_margin, success = bandit_fuzzer.run_hls_pipeline_and_evaluate(current_graph)
+                        improved = success and performance_margin > bandit_fuzzer.best_performance_margin
+                        if improved:
+                            bandit_fuzzer.best_graph = current_graph
+            else:
+                # Simulated performance evaluation for faster testing
+                performance_margin = np.random.normal(-0.05, 0.02)  # Simulate performance data
+                improved = performance_margin > bandit_fuzzer.best_performance_margin
+
+            # Update best performance if improved
+            if improved and performance_margin != float('-inf'):
                 print(f"[IMPROVE] New best margin: {performance_margin:.3f} (was {bandit_fuzzer.best_performance_margin:.3f})")
                 bandit_fuzzer.best_performance_margin = performance_margin
             
@@ -204,7 +246,7 @@ def test_bandit_learning(max_iterations=20, verbose=True):
     action_counts = [observer.action_choices.count(i) for i in range(4)]
     action_names = ['Add Input', 'Add Op', 'Add Loop', 'Add Branch']
     print("Action selection distribution:")
-    for i, (name, count) in enumerate(zip(action_names, action_counts)):
+    for name, count in zip(action_names, action_counts):
         print(f"  {name}: {count}")
     
     # Analytical performance improvements
@@ -223,6 +265,31 @@ def test_bandit_learning(max_iterations=20, verbose=True):
     return observer
 
 if __name__ == "__main__":
-    # Run the learning test
-    observer = test_bandit_learning(max_iterations=30, verbose=True)
-    print("\nTest complete! Check the result files in ./test_learning_output/ directory.")
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Test BanditFuzz learning process')
+    parser.add_argument('--iterations', type=int, default=10, help='Number of iterations to run')
+    parser.add_argument('--full-pipeline', action='store_true',
+                       help='Run full HLS pipeline (generates btor2 files, but slower)')
+    parser.add_argument('--verbose', action='store_true', default=True, help='Verbose output')
+
+    args = parser.parse_args()
+
+    if args.full_pipeline:
+        print("Running with FULL HLS pipeline - this will generate btor2 files but may take longer...")
+        observer = test_bandit_learning(
+            max_iterations=args.iterations,
+            verbose=args.verbose,
+            run_full_pipeline=True
+        )
+    else:
+        print("Running with SIMULATED evaluation - faster but no btor2 files generated...")
+        observer = test_bandit_learning(
+            max_iterations=args.iterations,
+            verbose=args.verbose,
+            run_full_pipeline=False
+        )
+
+    print(f"\nTest complete! Check the result files in ./test_learning_output/ directory.")
+    if args.full_pipeline:
+        print("BTOR2 files should be available in ./test_learning_output/btor2/ directory.")

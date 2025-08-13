@@ -20,3 +20,6 @@ run_benchmark.sh
 src/agents/__pycache__/
 solver/rIC3-adaptive
 test_output/
+.augment/
+.vscode/
+test_learning_output/
