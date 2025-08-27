@@ -542,6 +542,12 @@ class HLSBanditFuzz:
     def _dump_timeout_case(self, graph=None):
         """Dump timeout case files for good benchmark generation"""
         try:
+            # First verify that AIG file exists
+            aig_source = os.path.join(self.output_dir, "miter", "miter.aig")
+            if not os.path.exists(aig_source):
+                self._log_debug("Cannot dump timeout case: AIG file not found")
+                return None
+            
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             timeout_folder = os.path.join(self.timeout_cases_dir, f"timeout_case_{timestamp}")
             os.makedirs(timeout_folder, exist_ok=True)
@@ -558,6 +564,15 @@ class HLSBanditFuzz:
                     f.write(f"Graph Edges: {graph.number_of_edges()}\n")
                 if hasattr(self, 'mutation_history'):
                     f.write(f"Total Mutations: {len(self.mutation_history)}\n")
+                
+                # Check if AIG file exists in source
+                aig_source = os.path.join(self.output_dir, "miter", "miter.aig")
+                if os.path.exists(aig_source):
+                    f.write(f"AIG File Status: Available (miter/miter.aig)\n")
+                    aig_size = os.path.getsize(aig_source)
+                    f.write(f"AIG File Size: {aig_size} bytes\n")
+                else:
+                    f.write(f"AIG File Status: Missing from source\n")
             
             # Copy all relevant files from output directory
             if os.path.exists(self.output_dir):
@@ -572,10 +587,22 @@ class HLSBanditFuzz:
                     src = os.path.join(self.output_dir, item)
                     if os.path.exists(src):
                         dst = os.path.join(timeout_folder, item)
-                        if os.path.isdir(src):
-                            shutil.copytree(src, dst, ignore_errors=True)
-                        else:
-                            shutil.copy2(src, dst, follow_symlinks=False)
+                        try:
+                            if os.path.isdir(src):
+                                shutil.copytree(src, dst, ignore_errors=True)
+                                # Verify AIG file was copied
+                                if item == "miter":
+                                    aig_file = os.path.join(dst, "miter.aig")
+                                    if os.path.exists(aig_file):
+                                        self._log_debug(f"Successfully copied miter.aig to timeout case")
+                                    else:
+                                        self._log_debug(f"Warning: miter.aig not found in copied miter directory")
+                            else:
+                                shutil.copy2(src, dst, follow_symlinks=False)
+                        except Exception as copy_error:
+                            self._log_debug(f"Failed to copy {item}: {copy_error}")
+                    else:
+                        self._log_debug(f"Source file/directory not found: {src}")
                 
                 # Also copy BTOR2 files if they exist
                 btor2_src = self.btor2_output_dir
@@ -600,10 +627,17 @@ class HLSBanditFuzz:
                         f.write(f"{i:3d}. Action {mutation['action_idx']:2d}: {mutation['action_name']}\n")
             
             self._log_debug(f"Timeout case dumped to: {timeout_folder}")
-            if not self.verbose:
-                print(f"[GOOD CASE] rIC3 timeout detected. Benchmark saved to: {timeout_folder}")
             
-            return timeout_folder
+            # Final verification that AIG file was successfully copied
+            copied_aig = os.path.join(timeout_folder, "miter", "miter.aig")
+            if os.path.exists(copied_aig):
+                if not self.verbose:
+                    print(f"[GOOD CASE] rIC3 timeout detected. Benchmark with AIG saved to: {timeout_folder}")
+                return timeout_folder
+            else:
+                if not self.verbose:
+                    print(f"[WARNING] Timeout case saved but AIG file missing: {timeout_folder}")
+                return timeout_folder
             
         except Exception as e:
             self._log_debug(f"Failed to dump timeout case: {e}")
