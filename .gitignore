@@ -23,3 +23,8 @@ test_output/
 .augment/
 .vscode/
 test_learning_output/
+test_*/
+abc/
+*.btor2
+*.aig
+*.log
