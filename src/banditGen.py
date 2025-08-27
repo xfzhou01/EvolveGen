@@ -16,21 +16,23 @@ class HLSBanditFuzz:
 		# BanditFuzz components
 		self.actions = self.graph_manager.bandit_action_list
 		# Use more conservative parameters to encourage balanced exploration
-		self.action_agent = ThompsonSampling(n_actions=len(self.actions), decay=0.99, initial_alpha=5, initial_beta=5)
-		self.strategy_agent = ThompsonSampling(n_actions=2, decay=0.99, initial_alpha=5, initial_beta=5)  # Generate new graph vs. Mutate existing graph
+		self.action_agent = ThompsonSampling(n_actions=len(self.actions), decay=0.99, initial_alpha=10, initial_beta=5)  # 增加initial_alpha使agent更保守
+		self.strategy_agent = ThompsonSampling(n_actions=2, decay=0.99, initial_alpha=10, initial_beta=5)  # Generate new graph vs. Mutate existing graph
 
 		# State management
 		self.best_graph = None
 		self.best_performance_margin = float('-inf')  # Goal is to maximize performance difference
-		self.max_iter = 1000
+		self.max_iter = 100  # 减少迭代次数，避免生成过于复杂的模型
 		self.verbose = verbose
+
+		# Removed incremental graph growth parameters
 
 		# Incremental mutation state
 		self.current_working_graph = None  # Current graph being mutated
 		self.current_working_performance = float('-inf')  # Performance of current working graph
 		self.mutation_history = []  # Track applied actions for debugging
 		self.stagnation_counter = 0  # Count iterations without improvement
-		self.max_stagnation = 10  # Reset working graph after this many stagnant iterations
+		self.max_stagnation = 5  # 降低停滞阈值，更快重置，避免陷入复杂模型
 
 		# Path configuration
 		self.output_dir = output_dir
@@ -67,37 +69,37 @@ class HLSBanditFuzz:
 			# 3. Generate Miter circuit
 			if self.verbose:
 				print("[DEBUG] Step 3: Miter generation...")
-			miter_file = self._generate_miter_circuit(verilog_files)
-			if not miter_file:
+			miter_result = self._generate_miter_circuit(verilog_files)
+			if not miter_result:
 				if self.verbose:
 					print("[ERROR] Step 3 failed: Miter generation")
 				return float('-inf'), False
-
-			# 4. Convert to BTOR2 format
-			if self.verbose:
-				print("[DEBUG] Step 4: BTOR2 conversion...")
-			btor2_file = self._convert_to_btor2(miter_file)
-			if not btor2_file:
+			elif miter_result == "COMBINATIONAL_LOGIC":
 				if self.verbose:
-					print("[ERROR] Step 4 failed: BTOR2 conversion")
+					print("[INFO] Detected pure combinational logic - will regenerate graph")
+				return float('-inf'), "RETRY"  # 特殊返回值表示需要重新生成
+			miter_directory = miter_result
+
+			# 4. Convert miter to AIG using Yosys
+			if self.verbose:
+				print("[DEBUG] Step 4: Converting miter to AIG...")
+			aig_file = self._convert_miter_to_aig(miter_directory)
+			if not aig_file:
+				if self.verbose:
+					print("[ERROR] Step 4 failed: AIG conversion")
 				return float('-inf'), False
 
-			# 4.5. Fix BTOR2 file: convert output to bad for property checking
-			self._fix_btor2_output_to_bad(btor2_file)
-
-			# 5. Run dual solver test
+			# 5. Run rIC3
 			if self.verbose:
-				print("[DEBUG] Step 5: Running solvers...")
-			smt_sweeper_time = self._run_smt_sweeper(btor2_file)
-			bitwuzla_time = self._run_bitwuzla(btor2_file)
+				print("[DEBUG] Step 5: Running rIC3...")
+			ric3_time = self._run_ric3(aig_file)
 
-			# 6. Calculate performance difference (Goal: bitwuzla slow, smt-sweeper fast)
-			performance_margin = bitwuzla_time - smt_sweeper_time
+			# 6. Calculate performance based on rIC3求解时间 (Goal: maximize rIC3 solving time)
+			performance_margin = ric3_time
 
 			if self.verbose:
-				print(f"SMT-Sweeper time: {smt_sweeper_time:.3f}s")
-				print(f"Bitwuzla time: {bitwuzla_time:.3f}s")
-				print(f"Performance margin: {performance_margin:.3f}s")
+				print(f"rIC3 time: {ric3_time:.3f}s")
+				print(f"Performance margin (rIC3 time): {performance_margin:.3f}s")
 
 			return performance_margin, True
 
@@ -198,7 +200,16 @@ class HLSBanditFuzz:
 			)
 
 			# Generate Miter circuit, returns the top module name
-			kairos_top = miter_generator.generate_miter()
+			# Use insert_assertions=False like traditional mode to maintain consistency
+			try:
+				kairos_top = miter_generator.generate_miter(insert_assertions=False)
+			except ValueError as ve:
+				if "expected to have `ap_rst` port" in str(ve) or "expected to have `ap_clk` port" in str(ve):
+					if self.verbose:
+						print(f"[WARNING] Generated Verilog lacks clock/reset ports (pure combinational logic): {ve}")
+					return "COMBINATIONAL_LOGIC"  # 返回特殊值表示纯组合逻辑
+				else:
+					raise ve
 
 			# Return the directory path containing the miter.v file
 			if self.verbose:
@@ -210,6 +221,61 @@ class HLSBanditFuzz:
 		except Exception as e:
 			if self.verbose:
 				print(f"Miter generation failed: {e}")
+				import traceback
+				traceback.print_exc()
+			return None
+
+	def _generate_miter_circuit_simplified(self, verilog_files_1, verilog_files_2, merged_verilog_folder):
+		"""
+		Simplified miter generation for combinational logic circuits.
+		Bypasses KairosPreprocessor when it fails due to missing clock/reset ports.
+		"""
+		try:
+			if self.verbose:
+				print("[INFO] Using simplified miter generation for combinational logic")
+			
+			# Import kairos_preprocess directly instead of using KairosPreprocessor
+			from verilog_processing import kairos_preprocess
+			
+			# Create merged Verilog files directly (same as MiterGenerator._merge_verilog)
+			merged_verilog_file_path_1 = os.path.join(merged_verilog_folder, "merged_1.v")
+			merged_verilog_file_path_2 = os.path.join(merged_verilog_folder, "merged_2.v")
+			miter_verilog_file_path = os.path.join(merged_verilog_folder, "miter.v")
+			
+			# Merge Verilog files
+			with open(merged_verilog_file_path_1, 'w') as outfile1:
+				for fname in verilog_files_1:
+					with open(fname) as infile:
+						outfile1.write(infile.read())
+						outfile1.write('\n')
+			
+			with open(merged_verilog_file_path_2, 'w') as outfile2:
+				for fname in verilog_files_2:
+					with open(fname) as infile:
+						outfile2.write(infile.read())
+						outfile2.write('\n')
+			
+			if self.verbose:
+				print("[DEBUG] Merged Verilog files created successfully")
+			
+			# Use kairos_preprocess directly without post-processing
+			# This bypasses the problematic VerilogPostProcessor
+			kairos_top = kairos_preprocess(
+				src_file_1=merged_verilog_file_path_1,
+				src_file_2=merged_verilog_file_path_2,
+				dst_file=miter_verilog_file_path,
+				fast_slow_mode=True
+			)
+			
+			if self.verbose:
+				print(f"[DEBUG] Simplified miter generation completed. Top module: {kairos_top}")
+				print(f"[DEBUG] Miter file: {miter_verilog_file_path}")
+			
+			return merged_verilog_folder
+			
+		except Exception as e:
+			if self.verbose:
+				print(f"[ERROR] Simplified miter generation failed: {e}")
 				import traceback
 				traceback.print_exc()
 			return None
@@ -271,146 +337,158 @@ class HLSBanditFuzz:
 				traceback.print_exc()
 			return None
 
-	def _run_smt_sweeper(self, btor2_file):
-		"""Runs SMT-Sweeper solver (Reference Solver - expected to be fast)"""
+
+	def _convert_miter_to_aig(self, miter_directory):
+		"""Converts the miter Verilog file to AIG format using Yosys"""
+		try:
+			# Find miter.v file
+			miter_file = os.path.join(miter_directory, "miter.v")
+			if not os.path.exists(miter_file):
+				if self.verbose:
+					print(f"[ERROR] Miter file not found: {miter_file}")
+				return None
+
+			# Create output directory for AIG
+			aig_output_dir = os.path.join(self.output_dir, "miter")
+			os.makedirs(aig_output_dir, exist_ok=True)
+			
+			aig_file = os.path.join(aig_output_dir, "miter.aig")
+
+			# Use YosysCompiler to convert
+			yosys_compiler = YosysCompiler()
+			yosys_compiler.execute(
+				verilog_file_path=miter_file,
+				working_dir=aig_output_dir,
+				aiger_file_path=aig_file,
+				top_name="top_A_times_top_B"  # Top module name from miter
+			)
+
+			# Check if AIG file was created
+			if os.path.exists(aig_file):
+				if self.verbose:
+					print(f"[DEBUG] AIG file created: {aig_file}")
+				return aig_file
+			else:
+				if self.verbose:
+					print(f"[ERROR] AIG file not created: {aig_file}")
+				return None
+
+		except Exception as e:
+			if self.verbose:
+				print(f"AIG conversion failed: {e}")
+				import traceback
+				traceback.print_exc()
+			return None
+
+
+	def _run_ric3(self, aig_file):
+		"""Runs rIC3 solver (Target Solver - we want to maximize its solving time)"""
 		try:
 			cmd = [
-				"./solver/smt-sweeper",
-				"-f", btor2_file,
-				"-i", "100",
-				"-b", "300",
-				"--dump_smt"
+				"./rIC3",
+				aig_file,
+				"--engine", "ic3"
 			]
 
 			start_time = time.time()
-			result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+			result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)  # 减少到10秒timeout
 			end_time = time.time()
 
 			solve_time = end_time - start_time
 
-			if result.returncode == 0:
-				# Save the generated SMT file to the generate directory
-				if result.stdout:
-					timestamp = int(time.time() * 1000000)
-					smt_file = os.path.join(self.generate_dir, f"{timestamp}.smt2")
-					with open(smt_file, 'w') as f:
-						f.write(result.stdout)
+			if self.verbose:
+				print(f"rIC3 result: {result.returncode}, time: {solve_time:.3f}s")
+				print(f"rIC3 stdout: {result.stdout[:200]}...")
+				if result.stderr:
+					print(f"rIC3 stderr: {result.stderr[:200]}...")
+			
+			# 成功解决问题时返回求解时间
+			if ("SAT" in result.stdout or "UNSAT" in result.stdout):
 				return solve_time
 			else:
-				return float('inf')  # Solving failed
-
-		except subprocess.TimeoutExpired:
-			return float('inf')  # Timeout
-		except Exception as e:
-			if self.verbose:
-				print(f"SMT-Sweeper failed: {e}")
-			return float('inf')
-
-	def _run_bitwuzla(self, btor2_file):
-		"""Runs Bitwuzla solver (Target Solver - expected to be slow)"""
-		try:
-			# Find the most recently generated SMT file
-			latest_smt_file = self._get_latest_smt_file()
-			if not latest_smt_file:
 				if self.verbose:
-					print(f"No SMT file found for Bitwuzla, using BTOR2 file: {btor2_file}")
-				# If no SMT file, use the BTOR2 file directly
-				latest_smt_file = btor2_file
-
-			cmd = [
-				"./solver/bitwuzla/build/src/main/bitwuzla",
-				latest_smt_file
-			]
-
-			start_time = time.time()
-			result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-			end_time = time.time()
-
-			solve_time = end_time - start_time
-
-			if self.verbose:
-				print(f"Bitwuzla result: {result.returncode}, time: {solve_time:.3f}s")
-
-			return solve_time
+					print(f"rIC3 failed with return code: {result.returncode}")
+				return float('inf')  # 解决失败
 
 		except subprocess.TimeoutExpired:
 			if self.verbose:
-				print("Bitwuzla timeout")
-			return float('inf')  # Timeout
+				print("rIC3 timeout (10s)")
+			return float('inf')  # 超时
 		except Exception as e:
 			if self.verbose:
-				print(f"Bitwuzla failed: {e}")
+				print(f"rIC3 failed: {e}")
 			return float('inf')
 
-	def _get_latest_smt_file(self):
-		"""Gets the latest SMT file in the generate directory"""
+
+
+	def _generate_robust_initial_graph(self):
+		"""Generate initial graph with guaranteed minimum viable structure"""
 		try:
-			# Simplified version of file lookup
-			smt_files = glob.glob(os.path.join(self.generate_dir, "*.smt2"))
-			if smt_files:
-				# Sort by modification time, return the latest
-				latest_file = max(smt_files, key=os.path.getmtime)
-				return latest_file
-			return None
-		except Exception:
-			return None
-
-	def _fix_btor2_output_to_bad(self, btor2_file):
-		"""Convert 'output' declarations to 'bad' in BTOR2 file for property checking"""
-		try:
-			if self.verbose:
-				print("[DEBUG] Fixing BTOR2 file: converting output to bad...")
-
-			# Read the BTOR2 file
-			with open(btor2_file, 'r') as f:
-				lines = f.readlines()
-
-			# Process each line
-			modified_lines = []
-			output_count = 0
-			for line in lines:
-				# Check if this line declares an output
-				if ' output ' in line:
-					# Convert output to bad
-					modified_line = line.replace(' output ', ' bad ')
-					modified_lines.append(modified_line)
-					output_count += 1
-					if self.verbose:
-						print(f"[DEBUG] Converted output to bad: {line.strip()} -> {modified_line.strip()}")
-				else:
-					modified_lines.append(line)
-
-			# Write back the modified content
-			with open(btor2_file, 'w') as f:
-				f.writelines(modified_lines)
-
-			if self.verbose:
-				print(f"[DEBUG] Fixed {output_count} output declarations in BTOR2 file")
-
+			# Start with reset
+			self.graph_manager._reset_all()
+			
+			# Generate a more complex graph similar to traditional mode to ensure time sequential logic
+			# This will force HLS to generate ap_clk and ap_rst ports
+			success = self.graph_manager.generate_random_graph(action_number_total=8)
+			if not success:
+				print("[ERROR] Failed to generate random graph")
+				return False
+			
+			# Verify we have a valid graph
+			op_nodes = self.graph_manager._get_op_node_list()
+			if len(op_nodes) < 3:  # At least 3 nodes for basic functionality
+				print(f"[ERROR] Insufficient nodes generated: {len(op_nodes)}")
+				return False
+			
+			print(f"[INFO] Generated robust initial graph: {len(op_nodes)} nodes")
+			return True
+			
 		except Exception as e:
-			if self.verbose:
-				print(f"[WARNING] Failed to fix BTOR2 file: {e}")
-			# Don't fail the entire pipeline for this
+			print(f"[ERROR] Exception in robust graph generation: {e}")
+			return False
 
 	def fuzz(self):
 		"""Main BanditFuzz fuzzing loop"""
 		print("[INFO] Starting HLS BanditFuzz...")
 
-		# Generate initial graph
+		# Generate initial graph with guaranteed structure
 		print("[INFO] Generating initial graph...")
-		success = self.graph_manager.generate_random_graph(action_number_total=20)
+		success = self._generate_robust_initial_graph()
 		if not success:
 			print("[ERROR] Failed to generate initial graph")
 			return
 
 		self.best_graph = copy.deepcopy(self.graph_manager.program_graph)
-		self.best_performance_margin, success = self.run_hls_pipeline_and_evaluate(self.best_graph)
-
-		if not success:
-			print(f"[ERROR] Failed to evaluate initial graph. Performance margin: {self.best_performance_margin}")
+		
+		# 尝试评估初始图，如果是纯组合逻辑则重新生成
+		max_retries = 5
+		retry_count = 0
+		while retry_count < max_retries:
+			self.best_performance_margin, success = self.run_hls_pipeline_and_evaluate(self.best_graph)
+			
+			if success == "RETRY":
+				# 检测到纯组合逻辑，重新生成图
+				if self.verbose:
+					print(f"[INFO] Initial graph generated pure combinational logic (attempt {retry_count + 1}/{max_retries}), regenerating...")
+				success = self.graph_manager.generate_random_graph_by_action_num(self.action_count)
+				if not success:
+					print("[ERROR] Failed to regenerate graph")
+					return
+				self.best_graph = copy.deepcopy(self.graph_manager.program_graph)
+				retry_count += 1
+				continue
+			else:
+				break
+		
+		if retry_count >= max_retries:
+			print(f"[ERROR] Failed to generate non-combinational graph after {max_retries} attempts")
 			return
 
-		print(f"[INFO] Initial performance margin: {self.best_performance_margin:.3f}")
+		if not success:
+			print(f"[ERROR] Failed to evaluate initial graph. rIC3 time: {self.best_performance_margin:.3f}s")
+			return
+
+		print(f"[INFO] Initial rIC3 time: {self.best_performance_margin:.3f}s")
 
 		# Initialize working graph for incremental mutation
 		self.current_working_graph = copy.deepcopy(self.best_graph)
@@ -428,7 +506,7 @@ class HLSBanditFuzz:
 
 			if strategy == 0:  # Generate new graph
 				print("[INFO] Generating new graph...")
-				success = self.graph_manager.generate_random_graph(action_number_total=20)
+				success = self._generate_robust_initial_graph()
 				if success:
 					new_graph = copy.deepcopy(self.graph_manager.program_graph)
 					# Reset working graph when generating new graph
@@ -455,6 +533,15 @@ class HLSBanditFuzz:
 			# Evaluate the new graph
 			performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
 
+			if success == "RETRY":
+				# 检测到纯组合逻辑，跳过这次变异
+				if self.verbose:
+					print("[INFO] Generated pure combinational logic, skipping this mutation")
+				self.strategy_agent.reward(False)
+				if strategy == 1:  # Only reward action agent if mutation
+					self.action_agent.reward(False)
+				continue
+
 			if not success:
 				# Evaluation failed, give negative reward
 				self.strategy_agent.reward(False)
@@ -473,7 +560,7 @@ class HLSBanditFuzz:
 			action_reward = local_improvement if strategy == 1 else False
 
 			if global_improvement:
-				print(f"[GLOBAL IMPROVE] New best margin: {performance_margin:.3f} (was {self.best_performance_margin:.3f})")
+				print(f"[GLOBAL IMPROVE] New best rIC3 time: {performance_margin:.3f}s (was {self.best_performance_margin:.3f}s)")
 				self.best_graph = new_graph
 				self.best_performance_margin = performance_margin
 
@@ -490,7 +577,7 @@ class HLSBanditFuzz:
 				# Save best graph
 				self._save_best_graph()
 			elif local_improvement and strategy == 1:
-				print(f"[LOCAL IMPROVE] Working graph improved: {performance_margin:.3f} (was {self.current_working_performance:.3f})")
+				print(f"[LOCAL IMPROVE] Working graph improved rIC3 time: {performance_margin:.3f}s (was {self.current_working_performance:.3f}s)")
 				# Update working graph even if not globally best
 				self.current_working_graph = copy.deepcopy(new_graph)
 				self.current_working_performance = performance_margin
@@ -508,7 +595,7 @@ class HLSBanditFuzz:
 			if strategy == 1:  # Only reward action agent if mutation
 				self.action_agent.reward(action_reward)
 
-			print(f"[INFO] Current margin: {performance_margin:.3f}, Best: {self.best_performance_margin:.3f}")
+			print(f"[INFO] Current rIC3 time: {performance_margin:.3f}s, Best: {self.best_performance_margin:.3f}s")
 			if strategy == 1 and self.verbose:
 				print(f"[INFO] Working graph mutations applied: {len(self.mutation_history)}")
 
@@ -516,7 +603,7 @@ class HLSBanditFuzz:
 			if iteration % 10 == 0:
 				self._print_mutation_summary()
 
-		print(f"\n[INFO] BanditFuzz completed. Best performance margin: {self.best_performance_margin:.3f}")
+		print(f"\n[INFO] BanditFuzz completed. Best rIC3 time: {self.best_performance_margin:.3f}s")
 
 		# Final summary
 		print(f"[INFO] Final mutation summary:")
@@ -632,7 +719,7 @@ class HLSBanditFuzz:
 		try:
 			history_file = os.path.join(self.output_dir, "mutation_history.txt")
 			with open(history_file, 'w') as f:
-				f.write(f"Best Performance Margin: {self.best_performance_margin:.3f}\n")
+				f.write(f"Best rIC3 Solving Time: {self.best_performance_margin:.3f}s\n")
 				f.write(f"Total Mutations Applied: {len(self.mutation_history)}\n")
 				f.write(f"Current Stagnation Counter: {self.stagnation_counter}\n")
 				f.write("=" * 50 + "\n")
