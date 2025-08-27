@@ -1,4 +1,4 @@
-import os, time, subprocess, copy, sys
+import os, time, subprocess, copy, sys, shutil, datetime
 from contextlib import contextmanager
 from io import StringIO
 from agents import ThompsonSampling
@@ -36,9 +36,10 @@ class HLSBanditFuzz:
         self.output_dir = output_dir
         self.btor2_output_dir = os.path.join(output_dir, "btor2")
         self.generate_dir = "./generate"
+        self.error_dump_dir = os.path.join(output_dir, "error_dumps")
         
         # Create necessary directories
-        for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir]:
+        for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir, self.error_dump_dir]:
             os.makedirs(dir_path, exist_ok=True)
 
     @contextmanager
@@ -64,18 +65,21 @@ class HLSBanditFuzz:
             cpp_files = self._generate_cpp_from_graph(graph)
             if not cpp_files:
                 self._log_debug("C++ generation failed")
+                self._dump_error_state("cpp_generation", "C++ generation failed", graph)
                 return float('-inf'), False
 
             # Step 2: HLS compilation
             verilog_files = self._compile_with_hls(cpp_files)
             if not verilog_files:
                 self._log_debug("HLS compilation failed")
+                self._dump_error_state("hls_compilation", "HLS compilation failed", graph)
                 return float('-inf'), False
 
             # Step 3: Generate miter circuit
             miter_result = self._generate_miter_circuit(verilog_files)
             if not miter_result:
                 self._log_debug("Miter generation failed")
+                self._dump_error_state("miter_generation", "Miter generation failed", graph)
                 return float('-inf'), False
             elif miter_result == "COMBINATIONAL_LOGIC":
                 self._log_debug("Pure combinational logic detected - will regenerate")
@@ -85,6 +89,7 @@ class HLSBanditFuzz:
             aig_file = self._convert_miter_to_aig(miter_result)
             if not aig_file:
                 self._log_debug("AIG conversion failed")
+                self._dump_error_state("aig_conversion", "AIG conversion failed", graph)
                 return float('-inf'), False
 
             # Step 5: Run rIC3 solver and measure performance
@@ -95,6 +100,7 @@ class HLSBanditFuzz:
 
         except Exception as e:
             self._log_debug(f"Pipeline failed: {e}")
+            self._dump_error_state("pipeline_exception", str(e), graph)
             if self.verbose:
                 import traceback
                 traceback.print_exc()
@@ -307,7 +313,7 @@ class HLSBanditFuzz:
         else:
             return False
 
-        print(f"Initial rIC3 time: {self.best_performance_margin:.3f}s")
+        print(f"Initial rIC3 time: {self.best_performance_margin:.3f}s" if self.best_performance_margin != float('inf') else "Initial rIC3 time: timeout")
         self.current_working_graph = copy.deepcopy(self.best_graph)
         self.current_working_performance = self.best_performance_margin
         return True
@@ -346,8 +352,9 @@ class HLSBanditFuzz:
         
         # Basic output for non-verbose mode
         graph_size = new_graph.number_of_nodes()
+        time_str = f"{performance_margin:.3f}s" if performance_margin != float('inf') else "timeout"
         if not self.verbose:
-            print(f"Iteration {iteration}/{self.max_iter}: Graph size: {graph_size}, rIC3 time: {performance_margin:.3f}s")
+            print(f"Iteration {iteration}/{self.max_iter}: Graph size: {graph_size}, rIC3 time: {time_str}")
         
         # Update best graph if globally improved
         if global_improvement:
@@ -457,7 +464,16 @@ class HLSBanditFuzz:
     def _print_final_summary(self, successful_iterations, total_attempts):
         """Print final summary of fuzzing session"""
         success_rate = (successful_iterations/total_attempts*100) if total_attempts > 0 else 0
-        print(f"\nBanditFuzz completed. Best rIC3 time: {self.best_performance_margin:.3f}s")
+        
+        # Handle infinity display properly
+        if self.best_performance_margin == float('inf'):
+            best_time_str = "timeout"
+        elif self.best_performance_margin == float('-inf'):
+            best_time_str = "failed"
+        else:
+            best_time_str = f"{self.best_performance_margin:.3f}s"
+            
+        print(f"\nBanditFuzz completed. Best rIC3 time: {best_time_str}")
         print(f"Efficiency: {successful_iterations}/{total_attempts} iterations ({success_rate:.1f}% success rate)")
         
         if self.verbose:
@@ -471,3 +487,46 @@ class HLSBanditFuzz:
         """Log debug message only in verbose mode"""
         if self.verbose:
             print(f"[DEBUG] {message}")
+
+    def _dump_error_state(self, step_name, error_msg, graph=None):
+        """Dump error state files for debugging"""
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_folder = os.path.join(self.error_dump_dir, f"{step_name}_{timestamp}")
+            os.makedirs(error_folder, exist_ok=True)
+            
+            # Save error information
+            error_info_file = os.path.join(error_folder, "error_info.txt")
+            with open(error_info_file, 'w') as f:
+                f.write(f"Error Step: {step_name}\n")
+                f.write(f"Timestamp: {timestamp}\n")
+                f.write(f"Error Message: {error_msg}\n")
+                f.write(f"Output Directory: {self.output_dir}\n")
+                if graph:
+                    f.write(f"Graph Nodes: {graph.number_of_nodes()}\n")
+                    f.write(f"Graph Edges: {graph.number_of_edges()}\n")
+            
+            # Copy current output directory contents
+            if os.path.exists(self.output_dir):
+                for item in os.listdir(self.output_dir):
+                    if item != "error_dumps":  # Don't copy error dumps recursively
+                        src = os.path.join(self.output_dir, item)
+                        dst = os.path.join(error_folder, item)
+                        if os.path.isdir(src):
+                            shutil.copytree(src, dst, ignore_errors=True)
+                        else:
+                            shutil.copy2(src, dst, follow_symlinks=False)
+            
+            # Save graph if provided
+            if graph:
+                import pickle
+                graph_file = os.path.join(error_folder, "error_graph.pkl")
+                with open(graph_file, 'wb') as f:
+                    pickle.dump(graph, f)
+            
+            self._log_debug(f"Error state dumped to: {error_folder}")
+            if not self.verbose:
+                print(f"[ERROR] {step_name} failed. Debug files saved to: {error_folder}")
+            
+        except Exception as e:
+            self._log_debug(f"Failed to dump error state: {e}")
