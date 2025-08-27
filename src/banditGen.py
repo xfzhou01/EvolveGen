@@ -494,9 +494,13 @@ class HLSBanditFuzz:
 		self.current_working_graph = copy.deepcopy(self.best_graph)
 		self.current_working_performance = self.best_performance_margin
 
-		# Main loop
-		for iteration in range(1, self.max_iter + 1):
-			print(f"\n[INFO] Iteration {iteration}/{self.max_iter}")
+		# Main loop - use while loop to avoid wasting iterations on failures
+		successful_iterations = 0
+		total_attempts = 0
+		
+		while successful_iterations < self.max_iter:
+			total_attempts += 1
+			print(f"\n[INFO] Attempt {total_attempts} (Successful iterations: {successful_iterations}/{self.max_iter})")
 
 			# Agent 2 decides strategy: 0=Generate new graph, 1=Mutate existing graph
 			strategy = self.strategy_agent.select_action()
@@ -504,14 +508,21 @@ class HLSBanditFuzz:
 			# Store baseline performance for reward calculation
 			baseline_performance = self.current_working_performance if strategy == 1 else self.best_performance_margin
 
+			# Try to generate or mutate graph
+			new_graph = None
+			generation_success = False
+			
 			if strategy == 0:  # Generate new graph
 				print("[INFO] Generating new graph...")
-				success = self._generate_robust_initial_graph()
-				if success:
+				generation_success = self._generate_robust_initial_graph()
+				if generation_success:
 					new_graph = copy.deepcopy(self.graph_manager.program_graph)
 					# Reset working graph when generating new graph
 					self._reset_working_graph()
 				else:
+					if self.verbose:
+						print("[WARNING] Graph generation failed, retrying...")
+					# Don't reward agents for failed generation, just retry
 					continue
 			else:  # Incremental mutation of working graph
 				print("[INFO] Incrementally mutating working graph...")
@@ -523,6 +534,7 @@ class HLSBanditFuzz:
 
 				action_idx = self.action_agent.select_action()
 				new_graph = self._mutate_graph_incremental(action_idx)
+				generation_success = True  # Mutation always returns a graph (even if unchanged)
 
 				if self.verbose:
 					print(f"[DEBUG] Mutation history length: {len(self.mutation_history)}")
@@ -534,20 +546,26 @@ class HLSBanditFuzz:
 			performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
 
 			if success == "RETRY":
-				# 检测到纯组合逻辑，跳过这次变异
+				# 检测到纯组合逻辑，跳过这次变异但给予负反馈
 				if self.verbose:
-					print("[INFO] Generated pure combinational logic, skipping this mutation")
+					print("[INFO] Generated pure combinational logic, retrying...")
 				self.strategy_agent.reward(False)
 				if strategy == 1:  # Only reward action agent if mutation
 					self.action_agent.reward(False)
 				continue
 
 			if not success:
-				# Evaluation failed, give negative reward
+				# Evaluation failed, give negative reward and retry
+				if self.verbose:
+					print("[WARNING] HLS pipeline evaluation failed, retrying...")
 				self.strategy_agent.reward(False)
 				if strategy == 1:  # Only reward action agent if mutation
 					self.action_agent.reward(False)
 				continue
+
+			# If we reach here, this is a successful iteration
+			successful_iterations += 1
+			print(f"[SUCCESS] Completed iteration {successful_iterations}/{self.max_iter}")
 
 			# Calculate rewards based on improvement type
 			global_improvement = performance_margin > self.best_performance_margin
@@ -599,17 +617,20 @@ class HLSBanditFuzz:
 			if strategy == 1 and self.verbose:
 				print(f"[INFO] Working graph mutations applied: {len(self.mutation_history)}")
 
-			# Print detailed mutation summary every 10 iterations
-			if iteration % 10 == 0:
+			# Print detailed mutation summary every 10 successful iterations
+			if successful_iterations % 10 == 0:
 				self._print_mutation_summary()
 
 		print(f"\n[INFO] BanditFuzz completed. Best rIC3 time: {self.best_performance_margin:.3f}s")
+		print(f"[INFO] Efficiency: {successful_iterations} successful iterations out of {total_attempts} attempts ({(successful_iterations/total_attempts*100):.1f}% success rate)")
 
 		# Final summary
 		print(f"[INFO] Final mutation summary:")
 		print(f"  Total mutations in best path: {len(self.mutation_history)}")
 		print(f"  Final stagnation counter: {self.stagnation_counter}")
-		self._save_mutation_history()
+		print(f"  Total attempts: {total_attempts}")
+		print(f"  Successful iterations: {successful_iterations}")
+		self._save_mutation_history(total_attempts, successful_iterations)
 
 	def _mutate_graph_incremental(self, action_idx):
 		"""
@@ -714,7 +735,7 @@ class HLSBanditFuzz:
 			if self.verbose:
 				print(f"Failed to save best graph info: {e}")
 
-	def _save_mutation_history(self):
+	def _save_mutation_history(self, total_attempts=None, successful_iterations=None):
 		"""Save detailed mutation history for analysis"""
 		try:
 			history_file = os.path.join(self.output_dir, "mutation_history.txt")
@@ -722,6 +743,10 @@ class HLSBanditFuzz:
 				f.write(f"Best rIC3 Solving Time: {self.best_performance_margin:.3f}s\n")
 				f.write(f"Total Mutations Applied: {len(self.mutation_history)}\n")
 				f.write(f"Current Stagnation Counter: {self.stagnation_counter}\n")
+				if total_attempts is not None and successful_iterations is not None:
+					f.write(f"Total Attempts: {total_attempts}\n")
+					f.write(f"Successful Iterations: {successful_iterations}\n")
+					f.write(f"Success Rate: {(successful_iterations/total_attempts*100):.1f}%\n")
 				f.write("=" * 50 + "\n")
 				f.write("Mutation History:\n")
 
