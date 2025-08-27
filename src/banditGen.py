@@ -521,7 +521,7 @@ class HLSBanditFuzz:
                         src = os.path.join(self.output_dir, item)
                         dst = os.path.join(error_folder, item)
                         if os.path.isdir(src):
-                            shutil.copytree(src, dst, ignore_errors=True)
+                            shutil.copytree(src, dst, dirs_exist_ok=True)
                         else:
                             shutil.copy2(src, dst, follow_symlinks=False)
             
@@ -589,7 +589,7 @@ class HLSBanditFuzz:
                         dst = os.path.join(timeout_folder, item)
                         try:
                             if os.path.isdir(src):
-                                shutil.copytree(src, dst, ignore_errors=True)
+                                shutil.copytree(src, dst, dirs_exist_ok=True)
                                 # Verify AIG file was copied
                                 if item == "miter":
                                     aig_file = os.path.join(dst, "miter.aig")
@@ -608,7 +608,7 @@ class HLSBanditFuzz:
                 btor2_src = self.btor2_output_dir
                 if os.path.exists(btor2_src) and os.listdir(btor2_src):
                     btor2_dst = os.path.join(timeout_folder, "btor2")
-                    shutil.copytree(btor2_src, btor2_dst, ignore_errors=True)
+                    shutil.copytree(btor2_src, btor2_dst, dirs_exist_ok=True)
             
             # Save graph if provided
             if graph:
