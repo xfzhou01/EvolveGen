@@ -37,9 +37,10 @@ class HLSBanditFuzz:
         self.btor2_output_dir = os.path.join(output_dir, "btor2")
         self.generate_dir = "./generate"
         self.error_dump_dir = os.path.join(output_dir, "error_dumps")
+        self.timeout_cases_dir = os.path.join(output_dir, "timeout_cases")
         
         # Create necessary directories
-        for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir, self.error_dump_dir]:
+        for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir, self.error_dump_dir, self.timeout_cases_dir]:
             os.makedirs(dir_path, exist_ok=True)
 
     @contextmanager
@@ -93,10 +94,17 @@ class HLSBanditFuzz:
                 return float('-inf'), False
 
             # Step 5: Run rIC3 solver and measure performance
-            ric3_time = self._run_ric3(aig_file)
-            self._log_debug(f"rIC3 solving time: {ric3_time:.3f}s")
+            ric3_result = self._run_ric3(aig_file)
             
-            return ric3_time, True
+            # Handle timeout case (good benchmark)
+            if ric3_result == "TIMEOUT":
+                self._log_debug("rIC3 timeout detected - saving as good benchmark case")
+                self._dump_timeout_case(graph)
+                return float('inf'), True  # Timeout is considered a successful case (good benchmark)
+            
+            self._log_debug(f"rIC3 solving time: {ric3_result:.3f}s")
+            
+            return ric3_result, True
 
         except Exception as e:
             self._log_debug(f"Pipeline failed: {e}")
@@ -224,7 +232,7 @@ class HLSBanditFuzz:
 
         except subprocess.TimeoutExpired:
             self._log_debug("rIC3 timeout (10s)")
-            return float('inf')
+            return "TIMEOUT"  # 特殊标识表示超时
         except Exception as e:
             self._log_debug(f"rIC3 failed: {e}")
             return float('inf')
@@ -530,3 +538,73 @@ class HLSBanditFuzz:
             
         except Exception as e:
             self._log_debug(f"Failed to dump error state: {e}")
+
+    def _dump_timeout_case(self, graph=None):
+        """Dump timeout case files for good benchmark generation"""
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            timeout_folder = os.path.join(self.timeout_cases_dir, f"timeout_case_{timestamp}")
+            os.makedirs(timeout_folder, exist_ok=True)
+            
+            # Save timeout case information
+            timeout_info_file = os.path.join(timeout_folder, "timeout_info.txt")
+            with open(timeout_info_file, 'w') as f:
+                f.write(f"Timeout Case: rIC3 solver timeout (>10s)\n")
+                f.write(f"Timestamp: {timestamp}\n")
+                f.write(f"Status: Good benchmark case (hard to solve)\n")
+                f.write(f"Output Directory: {self.output_dir}\n")
+                if graph:
+                    f.write(f"Graph Nodes: {graph.number_of_nodes()}\n")
+                    f.write(f"Graph Edges: {graph.number_of_edges()}\n")
+                if hasattr(self, 'mutation_history'):
+                    f.write(f"Total Mutations: {len(self.mutation_history)}\n")
+            
+            # Copy all relevant files from output directory
+            if os.path.exists(self.output_dir):
+                files_to_copy = [
+                    "benchmark_1.cpp", "benchmark_2.cpp",  # C++ source files
+                    "compile_1", "compile_2",               # HLS compilation results
+                    "merged_verilog",                       # Merged Verilog files
+                    "miter"                                 # Miter circuit and AIG files
+                ]
+                
+                for item in files_to_copy:
+                    src = os.path.join(self.output_dir, item)
+                    if os.path.exists(src):
+                        dst = os.path.join(timeout_folder, item)
+                        if os.path.isdir(src):
+                            shutil.copytree(src, dst, ignore_errors=True)
+                        else:
+                            shutil.copy2(src, dst, follow_symlinks=False)
+                
+                # Also copy BTOR2 files if they exist
+                btor2_src = self.btor2_output_dir
+                if os.path.exists(btor2_src) and os.listdir(btor2_src):
+                    btor2_dst = os.path.join(timeout_folder, "btor2")
+                    shutil.copytree(btor2_src, btor2_dst, ignore_errors=True)
+            
+            # Save graph if provided
+            if graph:
+                import pickle
+                graph_file = os.path.join(timeout_folder, "timeout_graph.pkl")
+                with open(graph_file, 'wb') as f:
+                    pickle.dump(graph, f)
+            
+            # Save mutation history for this timeout case
+            if hasattr(self, 'mutation_history') and self.mutation_history:
+                history_file = os.path.join(timeout_folder, "mutation_history.txt")
+                with open(history_file, 'w') as f:
+                    f.write(f"Timeout Case Mutation History (Total: {len(self.mutation_history)}):\n")
+                    f.write("=" * 50 + "\n")
+                    for i, mutation in enumerate(self.mutation_history, 1):
+                        f.write(f"{i:3d}. Action {mutation['action_idx']:2d}: {mutation['action_name']}\n")
+            
+            self._log_debug(f"Timeout case dumped to: {timeout_folder}")
+            if not self.verbose:
+                print(f"[GOOD CASE] rIC3 timeout detected. Benchmark saved to: {timeout_folder}")
+            
+            return timeout_folder
+            
+        except Exception as e:
+            self._log_debug(f"Failed to dump timeout case: {e}")
+            return None
