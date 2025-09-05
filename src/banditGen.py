@@ -1,4 +1,4 @@
-import os, time, subprocess, copy, sys, shutil, datetime
+import os, time, subprocess, copy, sys, shutil, datetime, random
 from contextlib import contextmanager
 from io import StringIO
 from agents import ThompsonSampling
@@ -13,24 +13,28 @@ class HLSBanditFuzz:
         self.graph_manager = RandomGraphManager(seed=seed)
         self.hls_compiler = VitisHLSCompiler(working_dir=output_dir)
         self.yosys_compiler = YosysCompiler()
-        
+
+        # Seed management for reproducible but evolving generations
+        self.seed = seed  # base seed
+        self.generation_count = 0  # increments before each new graph
+
         # BanditFuzz agents with conservative parameters for balanced exploration
         self.actions = self.graph_manager.bandit_action_list
         self.action_agent = ThompsonSampling(n_actions=len(self.actions), decay=0.99, initial_alpha=10, initial_beta=5)
         self.strategy_agent = ThompsonSampling(n_actions=2, decay=0.99, initial_alpha=10, initial_beta=5)  # Generate vs Mutate
-        
+
         # Performance tracking
         self.best_graph = None
         self.best_performance_margin = float('-inf')
         self.current_working_graph = None
         self.current_working_performance = float('-inf')
-        
+
         # Learning parameters
         self.max_iter = 100
         self.max_stagnation = 5
         self.stagnation_counter = 0
         self.mutation_history = []
-        
+
         # Configuration
         self.verbose = verbose
         self.output_dir = output_dir
@@ -38,7 +42,7 @@ class HLSBanditFuzz:
         self.generate_dir = "./generate"
         self.error_dump_dir = os.path.join(output_dir, "error_dumps")
         self.timeout_cases_dir = os.path.join(output_dir, "timeout_cases")
-        
+
         # Create necessary directories
         for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir, self.error_dump_dir, self.timeout_cases_dir]:
             os.makedirs(dir_path, exist_ok=True)
@@ -241,16 +245,22 @@ class HLSBanditFuzz:
         """Generate initial graph with guaranteed sequential logic structure"""
         try:
             with self._suppress_output():
+                # Reseed RNG to ensure a different graph each generation while keeping determinism
+                self.generation_count += 1
+                derived_seed = self.seed + self.generation_count  # English: derive a new seed per generation
+                random.seed(derived_seed)  # English: reseed global RNG used by RandomGraphManager
+                self.graph_manager.seed = derived_seed  # English: keep pragma derivations consistent
+
                 self.graph_manager._reset_all()
-                success = self.graph_manager.generate_random_graph(action_number_total=8)
-            
+                success = self.graph_manager.generate_random_graph(action_number_total=10)
+
             if success:
                 op_nodes = self.graph_manager._get_op_node_list()
                 if len(op_nodes) >= 3:
                     if not self.verbose:
                         print(f"Generated initial graph: {len(op_nodes)} nodes")
                     return True
-                    
+
             self._log_debug("Failed to generate sufficient graph complexity")
             return False
         except Exception as e:
