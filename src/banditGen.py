@@ -1,11 +1,10 @@
-import os, time, subprocess, copy, sys, shutil, datetime, random
-from contextlib import contextmanager
-from io import StringIO
+import os, time, subprocess, copy, random
 from agents import ThompsonSampling
 from random_graph_manager import RandomGraphManager
 from vitis_hls_compiler import VitisHLSCompiler
 from miter_generator import MiterGenerator
 from yosys_compiler import YosysCompiler
+from utils import BanditFuzzUtils
 
 class HLSBanditFuzz:
     def __init__(self, output_dir="./output", seed=114514, verbose=False):
@@ -13,6 +12,7 @@ class HLSBanditFuzz:
         self.graph_manager = RandomGraphManager(seed=seed)
         self.hls_compiler = VitisHLSCompiler(working_dir=output_dir)
         self.yosys_compiler = YosysCompiler()
+        self.utils = BanditFuzzUtils(verbose=verbose, output_dir=output_dir)
 
         # Seed management for reproducible but evolving generations
         self.seed = seed  # base seed
@@ -40,25 +40,10 @@ class HLSBanditFuzz:
         self.output_dir = output_dir
         self.btor2_output_dir = os.path.join(output_dir, "btor2")
         self.generate_dir = "./generate"
-        self.error_dump_dir = os.path.join(output_dir, "error_dumps")
-        self.timeout_cases_dir = os.path.join(output_dir, "timeout_cases")
 
         # Create necessary directories
-        for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir, self.error_dump_dir, self.timeout_cases_dir]:
+        for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir]:
             os.makedirs(dir_path, exist_ok=True)
-
-    @contextmanager
-    def _suppress_output(self):
-        """Context manager to suppress stdout when not in verbose mode"""
-        if self.verbose:
-            yield
-        else:
-            old_stdout = sys.stdout
-            sys.stdout = StringIO()
-            try:
-                yield
-            finally:
-                sys.stdout = old_stdout
 
     def run_hls_pipeline_and_evaluate(self, graph):
         """
@@ -69,50 +54,50 @@ class HLSBanditFuzz:
             # Step 1: Generate C++ code
             cpp_files = self._generate_cpp_from_graph(graph)
             if not cpp_files:
-                self._log_debug("C++ generation failed")
-                self._dump_error_state("cpp_generation", "C++ generation failed", graph)
+                self.utils.log_debug("C++ generation failed")
+                self.utils.dump_error_state("cpp_generation", "C++ generation failed", graph)
                 return float('-inf'), False
 
             # Step 2: HLS compilation
             verilog_files = self._compile_with_hls(cpp_files)
             if not verilog_files:
-                self._log_debug("HLS compilation failed")
-                self._dump_error_state("hls_compilation", "HLS compilation failed", graph)
+                self.utils.log_debug("HLS compilation failed")
+                self.utils.dump_error_state("hls_compilation", "HLS compilation failed", graph)
                 return float('-inf'), False
 
             # Step 3: Generate miter circuit
             miter_result = self._generate_miter_circuit(verilog_files)
             if not miter_result:
-                self._log_debug("Miter generation failed")
-                self._dump_error_state("miter_generation", "Miter generation failed", graph)
+                self.utils.log_debug("Miter generation failed")
+                self.utils.dump_error_state("miter_generation", "Miter generation failed", graph)
                 return float('-inf'), False
             elif miter_result == "COMBINATIONAL_LOGIC":
-                self._log_debug("Pure combinational logic detected - will regenerate")
+                self.utils.log_debug("Pure combinational logic detected - will regenerate")
                 return float('-inf'), "RETRY"
 
             # Step 4: Convert to AIG format
             aig_file = self._convert_miter_to_aig(miter_result)
             if not aig_file:
-                self._log_debug("AIG conversion failed")
-                self._dump_error_state("aig_conversion", "AIG conversion failed", graph)
+                self.utils.log_debug("AIG conversion failed")
+                self.utils.dump_error_state("aig_conversion", "AIG conversion failed", graph)
                 return float('-inf'), False
 
             # Step 5: Run rIC3 solver and measure performance
             ric3_result = self._run_ric3(aig_file)
-            
+
             # Handle timeout case (good benchmark)
             if ric3_result == "TIMEOUT":
-                self._log_debug("rIC3 timeout detected - saving as good benchmark case")
-                self._dump_timeout_case(graph)
+                self.utils.log_debug("rIC3 timeout detected - saving as good benchmark case")
+                self.utils.dump_timeout_case(graph, self.mutation_history)
                 return float('inf'), True  # Timeout is considered a successful case (good benchmark)
-            
-            self._log_debug(f"rIC3 solving time: {ric3_result:.3f}s")
+
+            self.utils.log_debug(f"rIC3 solving time: {ric3_result:.3f}s")
             
             return ric3_result, True
 
         except Exception as e:
-            self._log_debug(f"Pipeline failed: {e}")
-            self._dump_error_state("pipeline_exception", str(e), graph)
+            self.utils.log_debug(f"Pipeline failed: {e}")
+            self.utils.dump_error_state("pipeline_exception", str(e), graph)
             if self.verbose:
                 import traceback
                 traceback.print_exc()
@@ -121,18 +106,18 @@ class HLSBanditFuzz:
     def _generate_cpp_from_graph(self, graph):
         """Generate C++ code from graph using comparison mode"""
         try:
-            with self._suppress_output():
+            with self.utils.suppress_output():
                 self.graph_manager.program_graph = graph
                 cpp_file_1 = os.path.join(self.output_dir, "benchmark_1.cpp")
                 cpp_file_2 = os.path.join(self.output_dir, "benchmark_2.cpp")
-                
+
                 self.graph_manager.dump_cpp_comparsion(cpp_file_1, cpp_file_2)
-            
+
             if os.path.exists(cpp_file_1) and os.path.exists(cpp_file_2):
                 return [cpp_file_1, cpp_file_2]
             return None
         except Exception as e:
-            self._log_debug(f"C++ generation failed: {e}")
+            self.utils.log_debug(f"C++ generation failed: {e}")
             return None
 
     def _compile_with_hls(self, cpp_files):
@@ -140,41 +125,41 @@ class HLSBanditFuzz:
         try:
             verilog_files_groups = []
             clock_periods = [self.graph_manager.cp_1, self.graph_manager.cp_2]
-            
+
             for i, cpp_file in enumerate(cpp_files):
                 project_name = f"hls_project_{i+1}"
                 clock_period = clock_periods[i] if i < len(clock_periods) else 10
-                
-                with self._suppress_output():
+
+                with self.utils.suppress_output():
                     result = self.hls_compiler.compile(
                         project_name=project_name,
                         top_name="top",
                         clock_period=clock_period,
                         cpp_file_list=[cpp_file]
                     )
-                
+
                 if result["success"]:
                     verilog_files_groups.append(result["verilog_files"])
                 else:
                     return None
-            
+
             return verilog_files_groups
         except Exception as e:
-            self._log_debug(f"HLS compilation failed: {e}")
+            self.utils.log_debug(f"HLS compilation failed: {e}")
             return None
 
     def _generate_miter_circuit(self, verilog_files_groups):
         """Generate miter circuit from Verilog files"""
         try:
             if len(verilog_files_groups) < 2:
-                self._log_debug("Need at least 2 groups of Verilog files for miter generation")
+                self.utils.log_debug("Need at least 2 groups of Verilog files for miter generation")
                 return None
 
             verilog_files_1, verilog_files_2 = verilog_files_groups[0], verilog_files_groups[1]
             merged_verilog_folder = os.path.join(self.output_dir, "merged_verilog")
             os.makedirs(merged_verilog_folder, exist_ok=True)
 
-            with self._suppress_output():
+            with self.utils.suppress_output():
                 miter_generator = MiterGenerator(
                     verilog_file_path_list_1=verilog_files_1,
                     verilog_file_path_list_2=verilog_files_2,
@@ -192,7 +177,7 @@ class HLSBanditFuzz:
                         raise ve
 
         except Exception as e:
-            self._log_debug(f"Miter generation failed: {e}")
+            self.utils.log_debug(f"Miter generation failed: {e}")
             return None
 
     def _convert_miter_to_aig(self, miter_directory):
@@ -200,14 +185,14 @@ class HLSBanditFuzz:
         try:
             miter_file = os.path.join(miter_directory, "miter.v")
             if not os.path.exists(miter_file):
-                self._log_debug(f"Miter file not found: {miter_file}")
+                self.utils.log_debug(f"Miter file not found: {miter_file}")
                 return None
 
             aig_output_dir = os.path.join(self.output_dir, "miter")
             os.makedirs(aig_output_dir, exist_ok=True)
             aig_file = os.path.join(aig_output_dir, "miter.aig")
 
-            with self._suppress_output():
+            with self.utils.suppress_output():
                 self.yosys_compiler.execute(
                     verilog_file_path=miter_file,
                     working_dir=aig_output_dir,
@@ -217,13 +202,13 @@ class HLSBanditFuzz:
 
             return aig_file if os.path.exists(aig_file) else None
         except Exception as e:
-            self._log_debug(f"AIG conversion failed: {e}")
+            self.utils.log_debug(f"AIG conversion failed: {e}")
             return None
 
     def _run_ric3(self, aig_file):
         """Run rIC3 solver and return solving time"""
         try:
-            cmd = ["./rIC3", aig_file, "--engine", "ic3"]
+            cmd = ["./rIC3-code/target/release/rIC3", aig_file]
             start_time = time.time()
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             solve_time = time.time() - start_time
@@ -231,20 +216,20 @@ class HLSBanditFuzz:
             if "SAT" in result.stdout or "UNSAT" in result.stdout:
                 return solve_time
             else:
-                self._log_debug(f"rIC3 failed with return code: {result.returncode}")
+                self.utils.log_debug(f"rIC3 failed with return code: {result.returncode}")
                 return float('inf')
 
         except subprocess.TimeoutExpired:
-            self._log_debug("rIC3 timeout (10s)")
-            return "TIMEOUT"  
+            self.utils.log_debug("rIC3 timeout (10s)")
+            return "TIMEOUT"
         except Exception as e:
-            self._log_debug(f"rIC3 failed: {e}")
+            self.utils.log_debug(f"rIC3 failed: {e}")
             return float('inf')
 
     def _generate_robust_initial_graph(self):
         """Generate initial graph with guaranteed sequential logic structure"""
         try:
-            with self._suppress_output():
+            with self.utils.suppress_output():
                 # Reseed RNG to ensure a different graph each generation while keeping determinism
                 self.generation_count += 1
                 derived_seed = self.seed + self.generation_count  #  derive a new seed per generation
@@ -252,7 +237,7 @@ class HLSBanditFuzz:
                 self.graph_manager.seed = derived_seed  #  keep pragma derivations consistent
 
                 self.graph_manager._reset_all()
-                success = self.graph_manager.generate_random_graph(action_number_total=20)
+                success = self.graph_manager.generate_random_graph(action_number_total=100)
 
             if success:
                 op_nodes = self.graph_manager._get_op_node_list()
@@ -261,10 +246,10 @@ class HLSBanditFuzz:
                         print(f"Generated initial graph: {len(op_nodes)} nodes")
                     return True
 
-            self._log_debug("Failed to generate sufficient graph complexity")
+            self.utils.log_debug("Failed to generate sufficient graph complexity")
             return False
         except Exception as e:
-            self._log_debug(f"Initial graph generation failed: {e}")
+            self.utils.log_debug(f"Initial graph generation failed: {e}")
             return False
 
     def fuzz(self):
@@ -304,7 +289,8 @@ class HLSBanditFuzz:
                                             performance_margin, baseline_performance)
 
         # Final summary
-        self._print_final_summary(successful_iterations, total_attempts)
+        self.utils.print_final_summary(self.best_performance_margin, self.mutation_history,
+                                      self.stagnation_counter, successful_iterations, total_attempts)
 
     def _initialize_with_valid_graph(self):
         """Initialize with a valid non-combinational graph"""
@@ -386,7 +372,8 @@ class HLSBanditFuzz:
                 self.current_working_graph = copy.deepcopy(new_graph)
                 self.current_working_performance = performance_margin
             
-            self._save_best_graph()
+            self.utils.save_best_graph_info(self.best_performance_margin, self.best_graph,
+                                           self.mutation_history, self.stagnation_counter)
         elif local_improvement and strategy == 1:
             if not self.verbose:
                 print(f"Local improvement: {performance_margin:.3f}s (was {self.current_working_performance:.3f}s)")
@@ -424,7 +411,7 @@ class HLSBanditFuzz:
 
             return self.current_working_graph
         except Exception as e:
-            self._log_debug(f"Incremental mutation failed: {e}")
+            self.utils.log_debug(f"Incremental mutation failed: {e}")
             return self.current_working_graph or self.best_graph
 
     def _reset_working_graph(self):
@@ -433,223 +420,3 @@ class HLSBanditFuzz:
         self.current_working_performance = self.best_performance_margin
         self.mutation_history = []
         self.stagnation_counter = 0
-
-    def _save_best_graph(self):
-        """Save information about the best performing graph"""
-        try:
-            best_info = {
-                "performance_margin": self.best_performance_margin,
-                "graph_nodes": self.best_graph.number_of_nodes(),
-                "graph_edges": self.best_graph.number_of_edges(),
-                "mutation_history_length": len(self.mutation_history),
-                "stagnation_counter": self.stagnation_counter
-            }
-
-            info_file = os.path.join(self.output_dir, "best_graph_info.txt")
-            with open(info_file, 'w') as f:
-                for key, value in best_info.items():
-                    f.write(f"{key}: {value}\n")
-
-            self._save_mutation_history()
-        except Exception as e:
-            self._log_debug(f"Failed to save best graph info: {e}")
-
-    def _save_mutation_history(self, total_attempts=None, successful_iterations=None):
-        """Save detailed mutation history for analysis"""
-        try:
-            history_file = os.path.join(self.output_dir, "mutation_history.txt")
-            with open(history_file, 'w') as f:
-                f.write(f"Best rIC3 Solving Time: {self.best_performance_margin:.3f}s\n")
-                f.write(f"Total Mutations Applied: {len(self.mutation_history)}\n")
-                f.write(f"Current Stagnation Counter: {self.stagnation_counter}\n")
-                
-                if total_attempts is not None and successful_iterations is not None:
-                    f.write(f"Total Attempts: {total_attempts}\n")
-                    f.write(f"Successful Iterations: {successful_iterations}\n")
-                    f.write(f"Success Rate: {(successful_iterations/total_attempts*100):.1f}%\n")
-                
-                f.write("=" * 50 + "\n")
-                f.write("Mutation History:\n")
-
-                for i, mutation in enumerate(self.mutation_history, 1):
-                    f.write(f"{i:3d}. Action {mutation['action_idx']:2d}: {mutation['action_name']}\n")
-
-                if not self.mutation_history:
-                    f.write("No mutations applied yet.\n")
-
-        except Exception as e:
-            self._log_debug(f"Failed to save mutation history: {e}")
-
-    def _print_final_summary(self, successful_iterations, total_attempts):
-        """Print final summary of fuzzing session"""
-        success_rate = (successful_iterations/total_attempts*100) if total_attempts > 0 else 0
-        
-        # Handle infinity display properly
-        if self.best_performance_margin == float('inf'):
-            best_time_str = "timeout"
-        elif self.best_performance_margin == float('-inf'):
-            best_time_str = "failed"
-        else:
-            best_time_str = f"{self.best_performance_margin:.3f}s"
-            
-        print(f"\nBanditFuzz completed. Best rIC3 time: {best_time_str}")
-        print(f"Efficiency: {successful_iterations}/{total_attempts} iterations ({success_rate:.1f}% success rate)")
-        
-        if self.verbose:
-            print(f"Final mutation summary:")
-            print(f"  Total mutations: {len(self.mutation_history)}")
-            print(f"  Final stagnation: {self.stagnation_counter}")
-        
-        self._save_mutation_history(total_attempts, successful_iterations)
-
-    def _log_debug(self, message):
-        """Log debug message only in verbose mode"""
-        if self.verbose:
-            print(f"[DEBUG] {message}")
-
-    def _dump_error_state(self, step_name, error_msg, graph=None):
-        """Dump error state files for debugging"""
-        try:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            error_folder = os.path.join(self.error_dump_dir, f"{step_name}_{timestamp}")
-            os.makedirs(error_folder, exist_ok=True)
-            
-            # Save error information
-            error_info_file = os.path.join(error_folder, "error_info.txt")
-            with open(error_info_file, 'w') as f:
-                f.write(f"Error Step: {step_name}\n")
-                f.write(f"Timestamp: {timestamp}\n")
-                f.write(f"Error Message: {error_msg}\n")
-                f.write(f"Output Directory: {self.output_dir}\n")
-                if graph:
-                    f.write(f"Graph Nodes: {graph.number_of_nodes()}\n")
-                    f.write(f"Graph Edges: {graph.number_of_edges()}\n")
-            
-            # Copy current output directory contents
-            if os.path.exists(self.output_dir):
-                for item in os.listdir(self.output_dir):
-                    if item != "error_dumps":  # Don't copy error dumps recursively
-                        src = os.path.join(self.output_dir, item)
-                        dst = os.path.join(error_folder, item)
-                        if os.path.isdir(src):
-                            shutil.copytree(src, dst, dirs_exist_ok=True)
-                        else:
-                            shutil.copy2(src, dst, follow_symlinks=False)
-            
-            # Save graph if provided
-            if graph:
-                import pickle
-                graph_file = os.path.join(error_folder, "error_graph.pkl")
-                with open(graph_file, 'wb') as f:
-                    pickle.dump(graph, f)
-            
-            self._log_debug(f"Error state dumped to: {error_folder}")
-            if not self.verbose:
-                print(f"[ERROR] {step_name} failed. Debug files saved to: {error_folder}")
-            
-        except Exception as e:
-            self._log_debug(f"Failed to dump error state: {e}")
-
-    def _dump_timeout_case(self, graph=None):
-        """Dump timeout case files for good benchmark generation"""
-        try:
-            # First verify that AIG file exists
-            aig_source = os.path.join(self.output_dir, "miter", "miter.aig")
-            if not os.path.exists(aig_source):
-                self._log_debug("Cannot dump timeout case: AIG file not found")
-                return None
-            
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            timeout_folder = os.path.join(self.timeout_cases_dir, f"timeout_case_{timestamp}")
-            os.makedirs(timeout_folder, exist_ok=True)
-            
-            # Save timeout case information
-            timeout_info_file = os.path.join(timeout_folder, "timeout_info.txt")
-            with open(timeout_info_file, 'w') as f:
-                f.write(f"Timeout Case: rIC3 solver timeout (>10s)\n")
-                f.write(f"Timestamp: {timestamp}\n")
-                f.write(f"Status: Good benchmark case (hard to solve)\n")
-                f.write(f"Output Directory: {self.output_dir}\n")
-                if graph:
-                    f.write(f"Graph Nodes: {graph.number_of_nodes()}\n")
-                    f.write(f"Graph Edges: {graph.number_of_edges()}\n")
-                if hasattr(self, 'mutation_history'):
-                    f.write(f"Total Mutations: {len(self.mutation_history)}\n")
-                
-                # Check if AIG file exists in source
-                aig_source = os.path.join(self.output_dir, "miter", "miter.aig")
-                if os.path.exists(aig_source):
-                    f.write(f"AIG File Status: Available (miter/miter.aig)\n")
-                    aig_size = os.path.getsize(aig_source)
-                    f.write(f"AIG File Size: {aig_size} bytes\n")
-                else:
-                    f.write(f"AIG File Status: Missing from source\n")
-            
-            # Copy all relevant files from output directory
-            if os.path.exists(self.output_dir):
-                files_to_copy = [
-                    "benchmark_1.cpp", "benchmark_2.cpp",  # C++ source files
-                    "compile_1", "compile_2",               # HLS compilation results
-                    "merged_verilog",                       # Merged Verilog files
-                    "miter"                                 # Miter circuit and AIG files
-                ]
-                
-                for item in files_to_copy:
-                    src = os.path.join(self.output_dir, item)
-                    if os.path.exists(src):
-                        dst = os.path.join(timeout_folder, item)
-                        try:
-                            if os.path.isdir(src):
-                                shutil.copytree(src, dst, dirs_exist_ok=True)
-                                # Verify AIG file was copied
-                                if item == "miter":
-                                    aig_file = os.path.join(dst, "miter.aig")
-                                    if os.path.exists(aig_file):
-                                        self._log_debug(f"Successfully copied miter.aig to timeout case")
-                                    else:
-                                        self._log_debug(f"Warning: miter.aig not found in copied miter directory")
-                            else:
-                                shutil.copy2(src, dst, follow_symlinks=False)
-                        except Exception as copy_error:
-                            self._log_debug(f"Failed to copy {item}: {copy_error}")
-                    else:
-                        self._log_debug(f"Source file/directory not found: {src}")
-                
-                # Also copy BTOR2 files if they exist
-                btor2_src = self.btor2_output_dir
-                if os.path.exists(btor2_src) and os.listdir(btor2_src):
-                    btor2_dst = os.path.join(timeout_folder, "btor2")
-                    shutil.copytree(btor2_src, btor2_dst, dirs_exist_ok=True)
-            
-            # Save graph if provided
-            if graph:
-                import pickle
-                graph_file = os.path.join(timeout_folder, "timeout_graph.pkl")
-                with open(graph_file, 'wb') as f:
-                    pickle.dump(graph, f)
-            
-            # Save mutation history for this timeout case
-            if hasattr(self, 'mutation_history') and self.mutation_history:
-                history_file = os.path.join(timeout_folder, "mutation_history.txt")
-                with open(history_file, 'w') as f:
-                    f.write(f"Timeout Case Mutation History (Total: {len(self.mutation_history)}):\n")
-                    f.write("=" * 50 + "\n")
-                    for i, mutation in enumerate(self.mutation_history, 1):
-                        f.write(f"{i:3d}. Action {mutation['action_idx']:2d}: {mutation['action_name']}\n")
-            
-            self._log_debug(f"Timeout case dumped to: {timeout_folder}")
-            
-            # Final verification that AIG file was successfully copied
-            copied_aig = os.path.join(timeout_folder, "miter", "miter.aig")
-            if os.path.exists(copied_aig):
-                if not self.verbose:
-                    print(f"[GOOD CASE] rIC3 timeout detected. Benchmark with AIG saved to: {timeout_folder}")
-                return timeout_folder
-            else:
-                if not self.verbose:
-                    print(f"[WARNING] Timeout case saved but AIG file missing: {timeout_folder}")
-                return timeout_folder
-            
-        except Exception as e:
-            self._log_debug(f"Failed to dump timeout case: {e}")
-            return None
