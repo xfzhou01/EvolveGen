@@ -556,7 +556,7 @@ class RandomGraphManager(GraphManager):
         return self.rand_pg_gen.generate_cp_ns()
         
 
-    def __init__(self, seed = 42):
+    def __init__(self, seed = 114514):
         super().__init__()
         self.seed = seed
         random.seed(seed)
@@ -567,7 +567,7 @@ class RandomGraphManager(GraphManager):
         # BanditFuzz action list
         self.bandit_action_list = [
             self._action_random_add_input,
-            self._action_random_add_loop,
+            #self._action_random_add_loop,
             self._action_random_add_branch,
             # More actions can be enabled gradually
              # self._action_random_add_array,
@@ -586,8 +586,8 @@ class RandomGraphManager(GraphManager):
         print("[INFO] Calling RandomGraphManager::_copy_graph_and_insert_pragmas")
         
         # Create deep copies of the graph to ensure node objects are independent
-        self.program_graph_copy_1 = nx.MultiDiGraph()
-        self.program_graph_copy_2 = nx.MultiDiGraph()
+        self.program_graph_copy_1 = nx.DiGraph()
+        self.program_graph_copy_2 = nx.DiGraph()
         
         # Deep copy nodes to ensure independence
         node_mapping_1 = {}
