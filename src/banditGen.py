@@ -26,13 +26,16 @@ class HLSBanditFuzz:
         # Performance tracking
         self.best_graph = None
         self.best_performance_margin = float('-inf')
-        self.current_working_graph = None
-        self.current_working_performance = float('-inf')
+
+        # Elite pool for population-based evolution
+        self.elite_pool = []  # List of (performance, graph, action_count) tuples
+        self.pool_size = 5  # Maximum elite pool capacity
+        self.initial_pool_size = 5  # Initial population size to fill
+        self.pool_refresh_ratio = 0.2  # Ratio of individuals to replace in refresh strategy
 
         # Learning parameters
         self.max_iter = 100
         self.max_stagnation = 5
-        self.stagnation_counter = 0
         self.mutation_history = []
 
         # Configuration
@@ -236,29 +239,33 @@ class HLSBanditFuzz:
 
         except subprocess.TimeoutExpired:
             self._log_debug("rIC3 timeout (10s)")
-            return "TIMEOUT"  # 特殊标识表示超时
+            return "TIMEOUT"  # Special identifier for timeout
         except Exception as e:
             self._log_debug(f"rIC3 failed: {e}")
             return float('inf')
 
     def _generate_robust_initial_graph(self):
         """Generate initial graph with guaranteed sequential logic structure"""
+        return self._generate_robust_initial_graph_with_complexity(20)
+
+    def _generate_robust_initial_graph_with_complexity(self, action_count):
+        """Generate initial graph with specified complexity"""
         try:
             with self._suppress_output():
                 # Reseed RNG to ensure a different graph each generation while keeping determinism
                 self.generation_count += 1
-                derived_seed = self.seed + self.generation_count  # English: derive a new seed per generation
-                random.seed(derived_seed)  # English: reseed global RNG used by RandomGraphManager
-                self.graph_manager.seed = derived_seed  # English: keep pragma derivations consistent
+                derived_seed = self.seed + self.generation_count  #  derive a new seed per generation
+                random.seed(derived_seed)  #  reseed global RNG used by RandomGraphManager
+                self.graph_manager.seed = derived_seed  #  keep pragma derivations consistent
 
                 self.graph_manager._reset_all()
-                success = self.graph_manager.generate_random_graph(action_number_total=10)
+                success = self.graph_manager.generate_random_graph(action_number_total=action_count)
 
             if success:
                 op_nodes = self.graph_manager._get_op_node_list()
                 if len(op_nodes) >= 3:
                     if not self.verbose:
-                        print(f"Generated initial graph: {len(op_nodes)} nodes")
+                        print(f"Generated initial graph: {len(op_nodes)} nodes (complexity: {action_count})")
                     return True
 
             self._log_debug("Failed to generate sufficient graph complexity")
@@ -282,79 +289,177 @@ class HLSBanditFuzz:
 
         while successful_iterations < self.max_iter:
             total_attempts += 1
-            
+
             # Strategy selection and execution
             strategy = self.strategy_agent.select_action()
-            baseline_performance = self.current_working_performance if strategy == 1 else self.best_performance_margin
-            
-            new_graph, generation_success = self._execute_strategy(strategy)
+
+            new_graph, baseline_performance, generation_success = self._execute_strategy(strategy)
             if not generation_success:
+                # Strategy execution failed after max attempts - this is rare but possible
+                self._log_debug(f"Strategy {strategy} failed after maximum attempts")
                 continue
 
-            # Evaluate new graph
-            performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
-            
-            if success == "RETRY" or not success:
-                self._handle_evaluation_failure(strategy, success)
-                continue
+            # Evaluate new graph with unlimited retry mechanism
+            eval_attempt = 0
+            while True:
+                performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
+
+                if success == "RETRY":
+                    # Regenerate graph and try again
+                    eval_attempt += 1
+                    if not self.verbose and eval_attempt % 5 == 0:
+                        print(f"  Evaluation retry {eval_attempt}...")
+
+                    # Generate new graph with same strategy
+                    new_graph, baseline_performance, generation_success = self._execute_strategy(strategy)
+                    # generation_success is always True now, so continue
+                    continue
+                elif success:
+                    # Evaluation succeeded
+                    break
+                else:
+                    # Evaluation failed, try again with same graph
+                    eval_attempt += 1
+                    if not self.verbose and eval_attempt % 5 == 0:
+                        print(f"  Evaluation retry {eval_attempt}...")
+                    continue
 
             # Process successful evaluation
             successful_iterations += 1
-            self._process_successful_iteration(successful_iterations, strategy, new_graph, 
+            self._process_successful_iteration(successful_iterations, strategy, new_graph,
                                             performance_margin, baseline_performance)
 
         # Final summary
         self._print_final_summary(successful_iterations, total_attempts)
 
     def _initialize_with_valid_graph(self):
-        """Initialize with a valid non-combinational graph"""
-        if not self._generate_robust_initial_graph():
-            return False
+        """Initialize elite pool with valid non-combinational graphs"""
+        print(f"Initializing elite pool with {self.initial_pool_size} individuals...")
 
-        self.best_graph = copy.deepcopy(self.graph_manager.program_graph)
-        
-        # Retry until we get a valid sequential circuit
-        max_retries = 5
-        for _ in range(max_retries):
-            self.best_performance_margin, success = self.run_hls_pipeline_and_evaluate(self.best_graph)
-            
-            if success == "RETRY":
-                if self._generate_robust_initial_graph():
-                    self.best_graph = copy.deepcopy(self.graph_manager.program_graph)
-                    continue
-                else:
-                    return False
-            elif success:
+        successful_individuals = 0
+        max_attempts = self.initial_pool_size * 10  # Allow more attempts to fill pool
+
+        for attempt in range(max_attempts):
+            if successful_individuals >= self.initial_pool_size:
                 break
-            else:
-                return False
-        else:
+
+            # Generate a new initial graph with unlimited retry
+            gen_attempt = 0
+            while True:
+                if self._generate_robust_initial_graph():
+                    candidate_graph = copy.deepcopy(self.graph_manager.program_graph)
+                    break
+
+                gen_attempt += 1
+                if gen_attempt % 10 == 0:
+                    print(f"  Initial graph generation attempt {gen_attempt}...")
+
+            # Evaluate the candidate graph with unlimited retry mechanism
+            eval_retry = 0
+            while True:
+                performance_margin, success = self.run_hls_pipeline_and_evaluate(candidate_graph)
+
+                if success == "RETRY" or not success:
+                    # Regenerate graph for retry or after failed evaluation
+                    if success == "RETRY":
+                        eval_retry += 1
+                        if eval_retry % 5 == 0:
+                            print(f"  Evaluation retry {eval_retry} (combinational)...")
+                    else:
+                        # Only print a simple notice to avoid clutter
+                        print("  Evaluation failed, regenerating graph...")
+
+                    retry_gen = 0
+                    while True:
+                        if self._generate_robust_initial_graph():
+                            candidate_graph = copy.deepcopy(self.graph_manager.program_graph)
+                            break
+
+                        retry_gen += 1
+                        if retry_gen % 5 == 0:
+                            print(f"    Retry graph generation attempt {retry_gen}...")
+                    continue
+                elif success:
+                    # Successfully evaluated - add to elite pool
+                    action_count = 10  # Fixed action count for initial graphs
+                    self.elite_pool.append((performance_margin, candidate_graph, action_count))
+                    successful_individuals += 1
+
+                    time_str = f"{performance_margin:.3f}s" if performance_margin != float('inf') else "timeout"
+                    print(f"Added individual {successful_individuals}/{self.initial_pool_size} to elite pool: rIC3 time {time_str}")
+                    break
+
+        if successful_individuals == 0:
+            print("Failed to generate any valid initial graphs for elite pool")
             return False
 
-        print(f"Initial rIC3 time: {self.best_performance_margin:.3f}s" if self.best_performance_margin != float('inf') else "Initial rIC3 time: timeout")
-        self.current_working_graph = copy.deepcopy(self.best_graph)
-        self.current_working_performance = self.best_performance_margin
+        # Sort elite pool by performance (descending order)
+        self.elite_pool.sort(key=lambda x: x[0], reverse=True)
+
+        # Set global best from the top of elite pool
+        best_performance, best_graph, _ = self.elite_pool[0]
+        self.best_graph = copy.deepcopy(best_graph)
+        self.best_performance_margin = best_performance
+
+        print(f"Elite pool initialized with {len(self.elite_pool)} individuals")
+        best_time_str = f"{self.best_performance_margin:.3f}s" if self.best_performance_margin != float('inf') else "timeout"
+        print(f"Best initial rIC3 time: {best_time_str}")
+
         return True
 
     def _execute_strategy(self, strategy):
-        """Execute selected strategy: generate new graph or mutate existing"""
-        if strategy == 0:  # Generate new graph
+        """Execute selected strategy: refresh population or mutate from population"""
+
+        if strategy == 0:  # Refresh population strategy
             if not self.verbose:
-                print("Generating new graph...")
-            if self._generate_robust_initial_graph():
-                self._reset_working_graph()
-                return copy.deepcopy(self.graph_manager.program_graph), True
-            return None, False
-        else:  # Mutate existing graph
+                print("Refreshing population...")
+
+            # Calculate average action count from elite pool for complexity guidance
+            if self.elite_pool:
+                avg_action_count = sum(action_count for _, _, action_count in self.elite_pool) / len(self.elite_pool)
+                avg_action_count = int(round(avg_action_count))
+            else:
+                avg_action_count = 10  # Default fallback
+
+            # Keep trying until generation succeeds
+            attempt = 0
+            while True:
+                if self._generate_robust_initial_graph_with_complexity(avg_action_count):
+                    new_graph = copy.deepcopy(self.graph_manager.program_graph)
+                    # Set initial action count attribute for tracking
+                    new_graph.initial_action_count = avg_action_count
+                    baseline_performance = self.best_performance_margin
+                    return new_graph, baseline_performance, True
+
+                attempt += 1
+                if not self.verbose and attempt % 10 == 0:
+                    print(f"  Graph generation attempt {attempt}...")
+
+        else:  # Mutate from population strategy
             if not self.verbose:
-                print("Mutating working graph...")
-            if self.stagnation_counter >= self.max_stagnation:
-                if not self.verbose:
-                    print(f"Resetting due to stagnation ({self.stagnation_counter} iterations)")
-                self._reset_working_graph()
-            
-            action_idx = self.action_agent.select_action()
-            return self._mutate_graph_incremental(action_idx), True
+                print("Mutating from population...")
+
+            if not self.elite_pool:
+                # Fallback if pool is empty
+                return None, float('-inf'), False
+
+            # Keep trying until mutation succeeds
+            attempt = 0
+            while True:
+                # Randomly select a parent from elite pool
+                parent_performance, parent_graph, parent_action_count = random.choice(self.elite_pool)
+
+                # Mutate the parent graph
+                mutated_graph = self._mutate_graph_incremental(parent_graph)
+                if mutated_graph is not None:
+                    # Attach parent info for tracking in _process_successful_iteration
+                    mutated_graph.parent_info = (parent_graph, parent_action_count)
+                    baseline_performance = parent_performance
+                    return mutated_graph, baseline_performance, True
+
+                attempt += 1
+                if not self.verbose and attempt % 10 == 0:
+                    print(f"  Mutation attempt {attempt}...")
 
     def _handle_evaluation_failure(self, strategy, _):
         """Handle evaluation failures and provide negative feedback"""
@@ -363,75 +468,102 @@ class HLSBanditFuzz:
             self.action_agent.reward(False)
 
     def _process_successful_iteration(self, iteration, strategy, new_graph, performance_margin, baseline_performance):
-        """Process successful evaluation and update state"""
-        # Calculate improvements
-        global_improvement = performance_margin > self.best_performance_margin
-        local_improvement = performance_margin > baseline_performance
-        
+        """Process successful evaluation and maintain elite pool"""
+        # Calculate action count for the new graph
+        if strategy == 0:  # Refresh strategy - use initial action count
+            action_count = getattr(new_graph, 'initial_action_count', 10)
+        else:  # Mutation strategy - increment parent's action count
+            if hasattr(new_graph, 'parent_info'):
+                _, parent_action_count = new_graph.parent_info
+                action_count = parent_action_count + 1
+            else:
+                action_count = 1  # Fallback
+
         # Basic output for non-verbose mode
         graph_size = new_graph.number_of_nodes()
         time_str = f"{performance_margin:.3f}s" if performance_margin != float('inf') else "timeout"
         if not self.verbose:
             print(f"Iteration {iteration}/{self.max_iter}: Graph size: {graph_size}, rIC3 time: {time_str}")
-        
-        # Update best graph if globally improved
-        if global_improvement:
-            if not self.verbose:
-                print(f"New best rIC3 time: {performance_margin:.3f}s (was {self.best_performance_margin:.3f}s)")
-            self.best_graph = new_graph
-            self.best_performance_margin = performance_margin
-            self.stagnation_counter = 0
-            
-            if strategy == 1:
-                self.current_working_graph = copy.deepcopy(new_graph)
-                self.current_working_performance = performance_margin
-            
-            self._save_best_graph()
-        elif local_improvement and strategy == 1:
-            if not self.verbose:
-                print(f"Local improvement: {performance_margin:.3f}s (was {self.current_working_performance:.3f}s)")
-            self.current_working_graph = copy.deepcopy(new_graph)
-            self.current_working_performance = performance_margin
-            self.stagnation_counter = 0
-        else:
-            self.stagnation_counter += 1
 
-        # Reward agents
+        # Determine if new graph should be added to elite pool
+        should_add_to_pool = False
+
+        if len(self.elite_pool) < self.pool_size:
+            # Pool not full - add directly
+            should_add_to_pool = True
+        else:
+            # Pool full - check if better than worst individual
+            worst_performance = min(perf for perf, _, _ in self.elite_pool)
+            if performance_margin > worst_performance:
+                should_add_to_pool = True
+
+        # Add to elite pool if qualified
+        if should_add_to_pool:
+            self.elite_pool.append((performance_margin, copy.deepcopy(new_graph), action_count))
+
+            # Remove worst individual if pool exceeds capacity
+            if len(self.elite_pool) > self.pool_size:
+                self.elite_pool.sort(key=lambda x: x[0], reverse=True)
+                self.elite_pool = self.elite_pool[:self.pool_size]
+            else:
+                # Keep pool sorted
+                self.elite_pool.sort(key=lambda x: x[0], reverse=True)
+
+            if not self.verbose:
+                print(f"Added to elite pool (size: {len(self.elite_pool)}/{self.pool_size})")
+
+        # Update global best if improved
+        pool_best_performance = self.elite_pool[0][0] if self.elite_pool else float('-inf')
+        if pool_best_performance > self.best_performance_margin:
+            self.best_performance_margin = pool_best_performance
+            self.best_graph = copy.deepcopy(self.elite_pool[0][1])
+
+            if not self.verbose:
+                best_time_str = f"{self.best_performance_margin:.3f}s" if self.best_performance_margin != float('inf') else "timeout"
+                print(f"New global best rIC3 time: {best_time_str}")
+
+            self._save_best_graph()
+
+        # Calculate improvement for agent rewards
+        local_improvement = performance_margin > baseline_performance
+
+        # Reward agents based on local improvement
         self.strategy_agent.reward(local_improvement)
         if strategy == 1:
             self.action_agent.reward(local_improvement)
 
-    def _mutate_graph_incremental(self, action_idx):
-        """Incrementally mutate current working graph"""
+    def _mutate_graph_incremental(self, input_graph):
+        """Incrementally mutate the given input graph"""
         try:
-            if self.current_working_graph is None:
-                self.current_working_graph = copy.deepcopy(self.best_graph)
-                self.mutation_history = []
+            # Set the input graph as the working graph
+            self.graph_manager.program_graph = copy.deepcopy(input_graph)
 
-            self.graph_manager.program_graph = copy.deepcopy(self.current_working_graph)
+            # Select a random action for mutation
+            action_idx = self.action_agent.select_action()
             action = self.actions[action_idx]
             action_name = getattr(action, '__name__', f"action_{action_idx}")
-            
+
             success = action()
             if success:
-                self.current_working_graph = copy.deepcopy(self.graph_manager.program_graph)
+                mutated_graph = copy.deepcopy(self.graph_manager.program_graph)
+
+                # Update mutation history for tracking
                 self.mutation_history.append({
                     'action_idx': action_idx,
                     'action_name': action_name,
                     'iteration': len(self.mutation_history) + 1
                 })
 
-            return self.current_working_graph
+                return mutated_graph
+            else:
+                # Mutation failed, return None to indicate failure
+                return None
+
         except Exception as e:
             self._log_debug(f"Incremental mutation failed: {e}")
-            return self.current_working_graph or self.best_graph
+            return None
 
-    def _reset_working_graph(self):
-        """Reset working graph to best graph state"""
-        self.current_working_graph = copy.deepcopy(self.best_graph)
-        self.current_working_performance = self.best_performance_margin
-        self.mutation_history = []
-        self.stagnation_counter = 0
+
 
     def _save_best_graph(self):
         """Save information about the best performing graph"""
@@ -441,7 +573,7 @@ class HLSBanditFuzz:
                 "graph_nodes": self.best_graph.number_of_nodes(),
                 "graph_edges": self.best_graph.number_of_edges(),
                 "mutation_history_length": len(self.mutation_history),
-                "stagnation_counter": self.stagnation_counter
+                "elite_pool_size": len(self.elite_pool)
             }
 
             info_file = os.path.join(self.output_dir, "best_graph_info.txt")
@@ -458,15 +590,22 @@ class HLSBanditFuzz:
         try:
             history_file = os.path.join(self.output_dir, "mutation_history.txt")
             with open(history_file, 'w') as f:
-                f.write(f"Best rIC3 Solving Time: {self.best_performance_margin:.3f}s\n")
+                best_time_str = f"{self.best_performance_margin:.3f}s" if self.best_performance_margin != float('inf') else "timeout"
+                f.write(f"Best rIC3 Solving Time: {best_time_str}\n")
                 f.write(f"Total Mutations Applied: {len(self.mutation_history)}\n")
-                f.write(f"Current Stagnation Counter: {self.stagnation_counter}\n")
-                
+                f.write(f"Elite Pool Size: {len(self.elite_pool)}/{self.pool_size}\n")
+
                 if total_attempts is not None and successful_iterations is not None:
                     f.write(f"Total Attempts: {total_attempts}\n")
                     f.write(f"Successful Iterations: {successful_iterations}\n")
                     f.write(f"Success Rate: {(successful_iterations/total_attempts*100):.1f}%\n")
-                
+
+                f.write("=" * 50 + "\n")
+                f.write("Elite Pool Summary:\n")
+                for i, (perf, _, action_count) in enumerate(self.elite_pool[:5], 1):  # Show top 5
+                    perf_str = f"{perf:.3f}s" if perf != float('inf') else "timeout"
+                    f.write(f"{i:2d}. Performance: {perf_str}, Actions: {action_count}\n")
+
                 f.write("=" * 50 + "\n")
                 f.write("Mutation History:\n")
 
@@ -495,9 +634,12 @@ class HLSBanditFuzz:
         print(f"Efficiency: {successful_iterations}/{total_attempts} iterations ({success_rate:.1f}% success rate)")
         
         if self.verbose:
-            print(f"Final mutation summary:")
+            print(f"Final summary:")
             print(f"  Total mutations: {len(self.mutation_history)}")
-            print(f"  Final stagnation: {self.stagnation_counter}")
+            print(f"  Elite pool size: {len(self.elite_pool)}/{self.pool_size}")
+            if self.elite_pool:
+                avg_actions = sum(ac for _, _, ac in self.elite_pool) / len(self.elite_pool)
+                print(f"  Average complexity: {avg_actions:.1f} actions")
         
         self._save_mutation_history(total_attempts, successful_iterations)
 
