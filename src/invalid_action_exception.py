@@ -1,0 +1,10 @@
+"""
+"""
+
+
+class InvalidActionException(Exception):
+    """
+    """
+    pass
+
+

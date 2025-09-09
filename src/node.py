@@ -91,6 +91,14 @@ class OpNode(Node):
     def __hash__(self):
         return hash((self.name, self.op_type, self.result_type, self.result_width, 
                     self.result_int_width_ap_fixed, self.result_wrap_mode, self.result_rounding_mode))
+    
+@dataclass
+class DepNode(Node):
+    predecessor:OpNode
+    successor:OpNode
+
+    def __hash__(self):
+        return hash(self.name)
 
 
 @dataclass

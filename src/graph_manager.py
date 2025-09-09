@@ -1,6 +1,10 @@
 from matplotlib import pyplot as plt
 import networkx as nx
 from node import OpNode, OperationType, ResultDataType, BranchNode, LoopNode, Node, ArrayNode
+from node import DepNode
+
+from queue import Queue
+
 from node import QuantizationMode, OverflowMode
 from node import BRAM_TYPE
 import shutil
@@ -10,27 +14,108 @@ from typing import Union, List
 class GraphManager:
 
     def __init__(self):
-        self.program_graph = nx.MultiDiGraph()
+        self.program_graph = nx.DiGraph()
+        self.program_graph_function_pipeline = False
+
+
         self.op_counter = 0
         self.loop_node_counter = 0
         self.branch_node_counter = 0
         self.array_node_counter = 0
         self.visit_node_counter = 0
         self.write_node_counter = 0
+        self.dep_node_counter = 0
 
         self.function_name = "top"
 
         # the program graphs for dumping various verilog
-        self.program_graph_copy_1 = nx.MultiDiGraph()
-        self.program_graph_copy_2 = nx.MultiDiGraph()
+        self.program_graph_copy_1 = nx.DiGraph()
+        self.program_graph_copy_2 = nx.DiGraph()
         self.cp_1 = 10
         self.cp_2 = 10
+        
+        self.function_pipeline_1 = False
+        self.function_pipeline_2 = False
 
     def get_clock_period_1(self):
         return self.cp_1
     
     def get_clock_period_2(self):
         return self.cp_2
+    
+    def _get_code_block_node_list_under_code_block_node(self, code_block_node):
+        code_block_node_list = []
+        q = Queue()
+        if not (isinstance(code_block_node, BranchNode) or \
+                isinstance(code_block_node, LoopNode)):
+            raise TypeError()
+        q.put(code_block_node)
+        # do bfs
+        while not q.empty():
+            bfs_n = q.get_nowait()
+            cb_node_succs = self.program_graph.successors(bfs_n)
+            for cbns in cb_node_succs:
+                if isinstance(cbns, BranchNode) or isinstance(cbns, LoopNode):
+                    q.put(cbns)
+                    code_block_node_list.append(cbns)
+        # 
+        return code_block_node_list
+    
+    def _get_lv_set_under_code_block_node(self, code_block_node):
+        lv_set = set()
+        q = Queue()
+        if not (isinstance(code_block_node, BranchNode) or \
+                isinstance(code_block_node, LoopNode)):
+            raise TypeError()
+        q.put(code_block_node)
+        # do bfs
+        while not q.empty():
+            bfs_n = q.get_nowait()
+            cb_node_succs = self.program_graph.successors(bfs_n)
+            for cbns in cb_node_succs:
+                if isinstance(cbns, BranchNode) or isinstance(cbns, LoopNode):
+                    q.put(cbns)
+                elif isinstance(cbns, OpNode):
+                    lv_set.add(cbns)
+        return lv_set
+    
+    def _get_rv_set_under_code_block_node(self, code_block_node):
+        rv_set = set()
+        q = Queue()
+        if not (isinstance(code_block_node, BranchNode) or \
+                isinstance(code_block_node, LoopNode)):
+            raise TypeError()
+        q.put(code_block_node)
+        # do bfs
+        while not q.empty():
+            bfs_n = q.get_nowait()
+            cb_node_succs = self.program_graph.successors(bfs_n)
+            for cbns in cb_node_succs:
+                if isinstance(cbns, BranchNode) or isinstance(cbns, LoopNode):
+                    q.put(cbns)
+                elif isinstance(cbns, OpNode):
+                    pl = list(self.program_graph.predecessors(cbns))
+                    for p in pl:
+                        if isinstance(p, OpNode):
+                            rv_set.add(p)
+        return rv_set
+
+    def _is_loop_empty_loop(self, loop_node):
+        # if not there is a op node under loop node, we judge it as an empty loop
+        q = Queue()
+        if not isinstance(loop_node, LoopNode):
+            raise TypeError()
+        q.put(loop_node)
+        # do bfs
+        while not q.empty():
+            bfs_n = q.get_nowait()
+            cb_node_succs = self.program_graph.successors(bfs_n)
+            for cbns in cb_node_succs:
+                if isinstance(cbns, BranchNode) or isinstance(cbns, LoopNode):
+                    q.put(cbns)
+                elif isinstance(cbns, OpNode):
+                    return False
+        return True
 
     def _get_op_node_list(self):
         """Traverse the graph and return all OpNode instances as a list, excluding WRITE operation types."""
@@ -79,6 +164,13 @@ class GraphManager:
             if isinstance(node, BranchNode):
                 branch_nodes.append(node)
         return branch_nodes
+    
+    def _get_dep_node_list(self):
+        dep_nodes = []
+        for node in self.program_graph.nodes():
+            if isinstance(node, dep_nodes):
+                dep_nodes.append(node)
+        return dep_nodes
 
     def get_function_name(self):
         return self.function_name
@@ -101,6 +193,44 @@ class GraphManager:
         array_node_instance:ArrayNode
         self.program_graph.add_node(array_node_instance)
         self.array_node_counter += 1
+
+    def add_dep_node(self, dep_node_created = None,
+                     predecessor_node:OpNode = None,
+                     successor_node:OpNode = None,
+                     loop_node:LoopNode = None,
+                     branch_node:BranchNode = None):
+        # dep node must belongs to a loop node / or can no directly belongs to 
+        # case: outside loop
+        #   v1 = v0 + 1
+        #   v2 = v1 + v0
+        #   v1 = v2 (dep)
+        # * in this case the dep is useless can will reduce the ability of expression
+        if dep_node_created is not Node:
+            print("use existing created dep node")
+            dep_node_instance = dep_node_created
+            dep_node_instance:DepNode
+            dep_node_instance.name = f"dep_{self.dep_node_counter}"
+        else:
+            if not isinstance(predecessor_node, OpNode):
+                raise ValueError("dep node's predecessor node should be op node")
+            if not isinstance(successor_node, OpNode):
+                raise ValueError("dep node's successor node should be op node")
+            dep_node_instance = DepNode(
+                name=f"dep_{self.dep_node_counter}",
+                predecessor=predecessor_node,
+                successor=successor_node
+            )
+        self.program_graph.add_node(dep_node_instance)
+
+        if loop_node is not None and branch_node is not None:
+            raise ValueError("loop node and branch node should not be `NOT none` at the same time")
+        if loop_node is not None:
+            self.program_graph.add_edge(loop_node, dep_node_instance)
+        if branch_node is not None:
+            self.program_graph.add_edge(branch_node, dep_node_instance, direction = br_node_branch)
+
+        self.dep_node_counter += 1
+        return dep_node_instance
 
 
 
@@ -278,14 +408,19 @@ class GraphManager:
         instr_str = ""
 
         GraphManager._graph_to_function_body_visitor_for_sanity_check.add(node)
-        
-        for n in list(self.program_graph.successors(node)):
+        # Sort successors: DepNode instances at the end
+        successors = list(self.program_graph.successors(node))
+        successors_sorted = sorted(successors, key=lambda n: isinstance(n, DepNode))
+        for n in successors_sorted:
             if isinstance(n, LoopNode):
                 instr_str += self._loop_node_to_str(n)
             elif isinstance(n, BranchNode):
                 instr_str += self._br_node_to_str(n)
             elif isinstance(n, OpNode):
                 instr_str += self._op_node_to_assignment_str(n)
+            elif isinstance(n, DepNode):
+                instr_str += self._dep_node_to_str(n)
+        
         tail_str = self._loop_node_tail_to_str(node=node)
         return head_str + pragma_str + instr_str + tail_str
     
@@ -389,6 +524,11 @@ class GraphManager:
 
     def _extract_opnode_from_a_list(self, list_of_nodes:list[Node]):
         return [_ for _ in list_of_nodes if isinstance(_, OpNode)]
+    
+    def _dep_node_to_str(self, node:DepNode):
+        right_value = node.predecessor.name
+        left_value = node.successor.name
+        return f"{right_value} = {left_value};"
 
     def _br_node_to_str(self, node:BranchNode):
         GraphManager._graph_to_function_body_visitor_for_sanity_check.add(node)
@@ -857,8 +997,10 @@ class GraphManager:
                 function_body += self._br_node_to_str(n) + "\n"
             elif isinstance(n, OpNode):
                 function_body += self._op_node_to_assignment_str(n) + "\n"
+            elif isinstance(n, DepNode):
+                function_body += self._dep_node_to_str(n) + "\n"
             elif isinstance(n, ArrayNode):
-                pass
+                raise NotImplementedError()
 
         GraphManager._graph_to_function_body_visitor_for_sanity_check.clear()
         return function_body
@@ -896,14 +1038,22 @@ class GraphManager:
 
         return f'//{formatted_datetime}\n#include"ap_int.h"\n#include"ap_fixed.h"\n'
 
+    def _function_pipeline_pragma(self):
+        if self.program_graph_function_pipeline:
+            return "#pragma HLS pipeline\n"
+        else:
+            return ""
+
     def _dump_cpp(self):
         # dump the program to cpp
         cpp_head = self._cpp_head_generation()
         function_decl = self._graph_to_function_decl()
+        function_pipeline_str = self._function_pipeline_pragma()
         interface_pragmas = self._graph_to_interface_pragmas()
         variable_decl = self._graph_to_function_variable_decl()
         function_body = self._graph_to_function_body()
         return f"{cpp_head}\n{function_decl}\n{interface_pragmas}"+\
+            f"\n{function_pipeline_str}\n"+\
             f"\n{variable_decl}\n{function_body}\n}}"
     
     def _graph_to_interface_pragmas(self):
@@ -962,8 +1112,8 @@ class GraphManager:
     def generate_cmp_graphs(self):
         print("[INFO] generate gragmas for 2 graphs for comparsion")
         print("[INFO] reset the graph pointer to empty")
-        self.program_graph_copy_1 = nx.MultiDiGraph()
-        self.program_graph_copy_2 = nx.MultiDiGraph()
+        self.program_graph_copy_1 = nx.DiGraph()
+        self.program_graph_copy_2 = nx.DiGraph()
         self._copy_graph_and_insert_pragmas()
 
         # simple check, have same number of nodes
@@ -1045,8 +1195,11 @@ class GraphManager:
     
     def _set_design_cp_in_ns(self):
         raise NotImplementedError("not overloaded")
+    
 
-    def _insert_pragmas_to_graph(self, program_graph_to_be_inserted:nx.MultiDiGraph):
+    
+
+    def _insert_pragmas_to_graph(self, program_graph_to_be_inserted:nx.DiGraph):
         for node in program_graph_to_be_inserted.nodes():
             if isinstance(node, LoopNode):
                 self._set_loop_node_pragmas(node)
@@ -1163,7 +1316,7 @@ class GraphManager:
 
     def find_and_print_edges_between_nodes(self, node_a, node_b):
         """
-        Find and print all edges from node_a to node_b in the MultiDiGraph.
+        Find and print all edges from node_a to node_b in the Digraph.
         
         Args:
             node_a: Source node
@@ -1235,3 +1388,12 @@ class GraphManager:
         return matching_edges
 
 
+    def _is_loop_node_inner_loop(self, loop_node:LoopNode):
+        if not isinstance(loop_node, LoopNode):
+            raise TypeError()
+        loop_node_succ_list = list(self.program_graph.successors(loop_node))
+        loop_node_succ_list = [_ for _ in loop_node_succ_list if isinstance(_, LoopNode)]
+        if len(loop_node_succ_list) == 0:
+            return True
+        return False
+        

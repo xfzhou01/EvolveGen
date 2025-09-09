@@ -1,6 +1,7 @@
 from graph_manager import GraphManager
 from node import Node, LoopNode, BranchNode, OpNode, ArrayNode, ResultDataType
 from node import OperationType
+from node import DepNode
 from enum import Enum
 from dataclasses import dataclass
 from random_type_generator import RandomTypeGenerator
@@ -10,6 +11,8 @@ import networkx as nx
 import numpy as np
 from node import QuantizationMode, OverflowMode
 from random_pragma_generator import RandomPragmaGenerator
+from invalid_action_exception import InvalidActionException
+import time
 # from typing import overload
 
 
@@ -74,6 +77,11 @@ class RandomGraphManager(GraphManager):
                 result_width=result_width
             )
         return op_node_instance
+    
+    def _generate_random_branch_node_in_loop_node(self, loop_node, branch_node):
+        pass
+
+
     
     def _generate_random_loop_node(self, op_node_list):
         if op_node_list is None:
@@ -200,6 +208,9 @@ class RandomGraphManager(GraphManager):
         
         return l[selected_index]
     
+    def _random_pick_from_list(self, l):
+        return random.choice(l)
+    
     def _random_binary_choice(self):
         # do an equal random binary choice that returns boolean
         return random.choice([True, False])
@@ -219,7 +230,73 @@ class RandomGraphManager(GraphManager):
             op_node_created=op_node_r,
             predecessor_list=[]
         )
+        return True    
+        
+    def _pick_random_code_block_node_under_code_block_node(self, code_block_node):
+        code_block_node_list = \
+            self._get_code_block_node_list_under_code_block_node(code_block_node)
+        code_block_node_list:list
+        code_block_node_list.append(None)
+        code_block_node_pick = self._random_pick_from_list_with_normal_distribution(code_block_node_list)
+        return code_block_node_pick
+    
+    def _generate_random_dep_node(self, code_block_node):
+        rv_set = self._get_rv_set_under_code_block_node(code_block_node)
+        lv_set = self._get_lv_set_under_code_block_node(code_block_node)
+        if len(rv_set) == 0:
+            raise InvalidActionException("no right values currently under code block")
+        if len(lv_set) == 0:
+            raise InvalidActionException("no left values currently under code block")
+        if len(rv_set) == 1 and len(lv_set) == 1 and list(rv_set)[0] == list(lv_set)[0]:
+            raise InvalidActionException("same left and right values, cannot add dep node")
+
+        rv_node_pick = self._random_pick_from_list_with_normal_distribution(list(rv_set))
+        lv_node_pick = self._random_pick_from_list_with_normal_distribution(list(lv_set))
+
+        return DepNode(
+            name="",
+            predecessor=rv_node_pick,
+            successor=lv_node_pick
+        )
+        
+    def _action_random_add_dep_in_code_block(self, code_block_node):
+        code_block_node_pick = self._pick_random_code_block_node_under_code_block_node(code_block_node)
+        if code_block_node_pick is None:
+            # directly in the code block node
+            dep_node_random_gen = self._generate_random_dep_node(
+                code_block_node=code_block_node
+            )
+            loop_node_for_dep = code_block_node if \
+                isinstance(code_block_node, LoopNode) else None
+            br_node_for_dep = code_block_node if \
+                isinstance(code_block_node, BranchNode) else None
+        else:
+            dep_node_random_gen = self._generate_random_dep_node(
+                code_block_node=code_block_node_pick
+            )
+            loop_node_for_dep = code_block_node if \
+                isinstance(code_block_node, LoopNode) else None
+            br_node_for_dep = code_block_node if \
+                isinstance(code_block_node, BranchNode) else None
+        self.add_dep_node(
+            dep_node_created=dep_node_random_gen,
+            loop_node=loop_node_for_dep,
+            branch_node=br_node_for_dep
+        )
         return True
+    
+    def _action_random_add_dep(self): # the action function that is used
+        print("[INFO] Do action: randomly add dependency in loop")
+        try:
+            loop_node_list = self._get_loop_node_list()
+
+            if len(loop_node_list) == 0:
+                raise InvalidActionException("no loop node currently in the graph")
+            loop_node_pick = self._random_pick_from_list(loop_node_list)
+            self._action_random_add_dep_in_code_block(loop_node_pick)
+            return True
+        except InvalidActionException as iae:
+            return False
     
     def _random_get_op_node_predecessor_list(self,op_node_r:OpNode):
         op_node_list = self._get_op_node_list()
@@ -488,12 +565,14 @@ class RandomGraphManager(GraphManager):
             self._action_random_add_op,
             self._action_random_add_loop,
             self._action_random_add_branch,
+            self._action_random_add_dep,
             # self._action_random_add_array_visit,
             # self._action_random_add_array_write
         ]
-        
+        print(f"[INFO]")
         print(f"[INFO] Starting random graph generation with {action_number_total} actions...")
         successful_actions = 0
+        random.seed(time.time())
         for i in range(action_number_total):
             # Randomly select an action from the list
             action = random.choice(action_list)
@@ -554,6 +633,12 @@ class RandomGraphManager(GraphManager):
 
     def _set_design_cp_in_ns(self):
         return self.rand_pg_gen.generate_cp_ns()
+    
+    def _set_design_cp_in_ns_strict(self):
+        return 2
+    
+    def _set_design_cp_in_ns_loose(self):
+        return 10
         
 
     def __init__(self, seed = 42):
@@ -569,6 +654,7 @@ class RandomGraphManager(GraphManager):
             self._action_random_add_input,
             self._action_random_add_loop,
             self._action_random_add_branch,
+            self._action_random_add_dep,
             # More actions can be enabled gradually
              # self._action_random_add_array,
             self._action_random_add_op,
@@ -576,56 +662,139 @@ class RandomGraphManager(GraphManager):
             # self._action_random_add_array_write
         ]
 
+    def _insert_pragmas_to_graph_mode_basic(self, program_graph_to_be_inserted:nx.DiGraph, graph_index):
+        # basic insertion, no optimization
+        for node in program_graph_to_be_inserted.nodes():
+            if isinstance(node, LoopNode):
+                self.rand_pg_gen.generate_pragma_for_loop_node_no_opt(node)
+        if graph_index == 1:
+            self.function_pipeline_1 = False
+        elif graph_index == 2:
+            self.function_pipeline_2 = False
+        else:
+            raise ValueError()
+
+    def _insert_pragmas_to_graph_mode_seq(self,program_graph_to_be_inserted:nx.DiGraph, graph_index):
+        # sequential insertion
+        # if the program graph does not contain loops,
+        #   do function pipeline
+        # if the program graph contain loops
+        #   for inner loops, do pipeline
+        #   let outer loops flatten automatically
+
+        is_contain_loops = False
+        for node in program_graph_to_be_inserted.nodes():
+            if isinstance(node, LoopNode):
+                if self._is_loop_empty_loop(node):
+                    continue
+                is_contain_loops = True
+                break
+
+        if is_contain_loops == False:
+            if graph_index == 1:
+                self.function_pipeline_1 = True
+            elif graph_index == 2:
+                self.function_pipeline_2 = True
+            else:
+                raise ValueError()
+            return
+        else:
+            for node in program_graph_to_be_inserted.nodes():
+                if isinstance(node, LoopNode):
+                    if self._is_loop_node_inner_loop(node):
+                        self.rand_pg_gen.generate_pragma_for_loop_node_pipeline_only(node)
+
+    def _insert_pragmas_to_graph_mode_quick(self, graph_index):
+        # quick execution pragma insertion
+        if graph_index == 1:
+            self.function_pipeline_1 = True
+        elif graph_index == 2:
+            self.function_pipeline_2 = True
+        else:
+            raise ValueError()
+
+    def _deep_copy_digraph(self, source_graph):
+        """
+        Create a deep copy of a DiGraph with completely independent nodes and edges.
+        
+        Args:
+            source_graph: The source NetworkX DiGraph to copy
+            
+        Returns:
+            tuple: (copied_graph, node_mapping) where copied_graph is the new DiGraph
+                   and node_mapping is a dict mapping original nodes to copied nodes
+        """
+        import copy
+        
+        # Create new empty DiGraph
+        copied_graph = nx.DiGraph()
+        node_mapping = {}
+        
+        # Deep copy all nodes to ensure complete independence
+        for node in source_graph.nodes():
+            # Create independent deep copy of each node
+            node_copy = copy.deepcopy(node)
+            
+            # Add node to the new graph
+            copied_graph.add_node(node_copy)
+            
+            # Store mapping for edge reconstruction
+            node_mapping[node] = node_copy
+        
+        # Deep copy all edges with their data
+        for source, target, edge_data in source_graph.edges(data=True):
+            # Copy edge data to ensure independence
+            edge_data_copy = copy.deepcopy(edge_data) if edge_data else {}
+            
+            # Add edge to copied graph using mapped nodes
+            copied_graph.add_edge(
+                node_mapping[source], 
+                node_mapping[target], 
+                **edge_data_copy
+            )
+        
+        return copied_graph, node_mapping
+    
+    def _copy_graph_and_insert_pragmas_seq(self):
+        print("[INFO] Calling RandomGraphManager::_copy_graph_and_insert_pragmas_seq")
+        self.program_graph_copy_1, _ = self._deep_copy_digraph(self.program_graph)
+        self.program_graph_copy_2, _ = self._deep_copy_digraph(self.program_graph)
+
     def _copy_graph_and_insert_pragmas(self):
         """
         Override parent method to ensure different pragma generation for comparison files.
-        This method creates two copies of the graph and inserts different random pragmas
+        This method creates two deep copies of the DiGraph and inserts different random pragmas
         into each copy by using different random seeds.
         """
-        import copy
         print("[INFO] Calling RandomGraphManager::_copy_graph_and_insert_pragmas")
         
-        # Create deep copies of the graph to ensure node objects are independent
-        self.program_graph_copy_1 = nx.MultiDiGraph()
-        self.program_graph_copy_2 = nx.MultiDiGraph()
-        
-        # Deep copy nodes to ensure independence
-        node_mapping_1 = {}
-        node_mapping_2 = {}
-        
-        for node in self.program_graph.nodes():
-            node_copy_1 = copy.deepcopy(node)
-            node_copy_2 = copy.deepcopy(node)
-            self.program_graph_copy_1.add_node(node_copy_1)
-            self.program_graph_copy_2.add_node(node_copy_2)
-            node_mapping_1[node] = node_copy_1
-            node_mapping_2[node] = node_copy_2
-        
-        # Copy edges using the new node mappings
-        for edge in self.program_graph.edges(data=True):
-            source, target, data = edge
-            self.program_graph_copy_1.add_edge(node_mapping_1[source], node_mapping_1[target], **data)
-            self.program_graph_copy_2.add_edge(node_mapping_2[source], node_mapping_2[target], **data)
+        # Create two independent deep copies of the DiGraph
+        self.program_graph_copy_1, _ = self._deep_copy_digraph(self.program_graph)
+        self.program_graph_copy_2, _ = self._deep_copy_digraph(self.program_graph)
 
         # Save current random state
         current_state = random.getstate()
         
         # Generate pragmas for copy 1 with original seed
         random.seed(self.seed * 2 + 1)  # Use a derived seed for copy 1
-        self._insert_pragmas_to_graph(self.program_graph_copy_1)
+        self._insert_pragmas_to_graph_mode_basic(
+            program_graph_to_be_inserted=self.program_graph_copy_1,
+            graph_index=1)
         
         # Generate pragmas for copy 2 with different seed
         random.seed(self.seed * 2 + 2)  # Use a different derived seed for copy 2
-        self._insert_pragmas_to_graph(self.program_graph_copy_2)
+        self._insert_pragmas_to_graph_mode_seq(
+            self.program_graph_copy_2,
+            graph_index=2)
         
         # Restore random state
         random.setstate(current_state)
 
         # Generate different clock period values
         random.seed(self.seed * 3 + 1)
-        self.cp_1 = self._set_design_cp_in_ns()
+        self.cp_1 = self._set_design_cp_in_ns_loose()
         random.seed(self.seed * 3 + 2) 
-        self.cp_2 = self._set_design_cp_in_ns()
+        self.cp_2 = self._set_design_cp_in_ns_strict()
         
         # Restore random state again
         random.setstate(current_state)

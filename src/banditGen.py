@@ -188,6 +188,8 @@ class HLSBanditFuzz:
                         raise ve
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             self._log_debug(f"Miter generation failed: {e}")
             return None
 
