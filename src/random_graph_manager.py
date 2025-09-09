@@ -572,7 +572,6 @@ class RandomGraphManager(GraphManager):
         print(f"[INFO]")
         print(f"[INFO] Starting random graph generation with {action_number_total} actions...")
         successful_actions = 0
-        random.seed(time.time())
         for i in range(action_number_total):
             # Randomly select an action from the list
             action = random.choice(action_list)
