@@ -651,7 +651,7 @@ class RandomGraphManager(GraphManager):
         # BanditFuzz action list
         self.bandit_action_list = [
             self._action_random_add_input,
-            self._action_random_add_loop,
+            #self._action_random_add_loop,
             self._action_random_add_branch,
             self._action_random_add_dep,
             # More actions can be enabled gradually
