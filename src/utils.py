@@ -183,7 +183,7 @@ class BanditFuzzUtils:
             self.log_debug(f"Failed to dump timeout case: {e}")
             return None
 
-    def save_best_graph_info(self, best_performance_margin, best_graph, mutation_history, stagnation_counter):
+    def save_best_graph_info(self, best_performance_margin, best_graph, mutation_history, stagnation_counter, best_graph_action_count=None):
         """Save information about the best performing graph"""
         try:
             best_info = {
@@ -193,6 +193,10 @@ class BanditFuzzUtils:
                 "mutation_history_length": len(mutation_history),
                 "stagnation_counter": stagnation_counter
             }
+
+            # Add action count if provided
+            if best_graph_action_count is not None:
+                best_info["best_graph_action_count"] = best_graph_action_count
 
             info_file = os.path.join(self.output_dir, "best_graph_info.txt")
             with open(info_file, 'w') as f:

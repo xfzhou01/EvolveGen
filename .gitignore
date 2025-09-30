@@ -28,3 +28,8 @@ abc/
 *.btor2
 *.aig
 *.log
+.spec-workflow/
+repomix-repo.txt
+test/output_seed_42.cpp
+deprecated/
+

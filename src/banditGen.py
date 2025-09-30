@@ -7,7 +7,7 @@ from yosys_compiler import YosysCompiler
 from utils import BanditFuzzUtils
 
 class HLSBanditFuzz:
-    def __init__(self, output_dir="./output", seed=114514, verbose=False):
+    def __init__(self, output_dir="./output", seed=114514, verbose=False, initial_action_count=None):
         # Core components initialization
         self.graph_manager = RandomGraphManager(seed=seed)
         self.hls_compiler = VitisHLSCompiler(working_dir=output_dir)
@@ -29,6 +29,10 @@ class HLSBanditFuzz:
         self.current_working_graph = None
         self.current_working_performance = float('-inf')
 
+        # Action count tracking for best graph
+        self.best_graph_action_count = 100  # Default initial action count
+        self.current_graph_action_count = 100  # Track current graph's action count
+
         # Learning parameters
         self.max_iter = 100
         self.max_stagnation = 5
@@ -44,6 +48,38 @@ class HLSBanditFuzz:
         # Create necessary directories
         for dir_path in [self.output_dir, self.btor2_output_dir, self.generate_dir]:
             os.makedirs(dir_path, exist_ok=True)
+
+        # Initialize initial action count (CLI/constructor arg overrides saved value)
+        if initial_action_count is not None:
+            if not isinstance(initial_action_count, int) or initial_action_count <= 0:
+                raise ValueError("initial_action_count must be a positive integer")
+            self.best_graph_action_count = int(initial_action_count)
+            self.current_graph_action_count = int(initial_action_count)
+        else:
+            # Try to load previous best graph action count
+            self._load_previous_best_action_count()
+
+
+        # Timing trackers
+        self._fuzz_start_time = None
+        self._first_timeout_elapsed = None
+
+    def _load_previous_best_action_count(self):
+        """Load previously saved best graph action count if available"""
+        try:
+            info_file = os.path.join(self.output_dir, "best_graph_info.txt")
+            if os.path.exists(info_file):
+                with open(info_file, 'r') as f:
+                    for line in f:
+                        if line.startswith("best_graph_action_count:"):
+                            action_count = int(line.split(":")[1].strip())
+                            self.best_graph_action_count = action_count
+                            if not self.verbose:
+                                print(f"Loaded previous best graph action count: {action_count}")
+                            break
+        except Exception as e:
+            if self.verbose:
+                print(f"Could not load previous best action count: {e}")
 
     def run_hls_pipeline_and_evaluate(self, graph):
         """
@@ -88,11 +124,16 @@ class HLSBanditFuzz:
             # Handle timeout case (good benchmark)
             if ric3_result == "TIMEOUT":
                 self.utils.log_debug("rIC3 timeout detected - saving as good benchmark case")
+                # If it's the first TIMEOUT, record and print time since fuzz start
+                if self._first_timeout_elapsed is None and self._fuzz_start_time is not None:
+                    self._first_timeout_elapsed = time.time() - self._fuzz_start_time
+                    if not self.verbose:
+                        print(f"Time to first TIMEOUT: {self._first_timeout_elapsed:.3f}s")
                 self.utils.dump_timeout_case(graph, self.mutation_history)
                 return float('inf'), True  # Timeout is considered a successful case (good benchmark)
 
             self.utils.log_debug(f"rIC3 solving time: {ric3_result:.3f}s")
-            
+
             return ric3_result, True
 
         except Exception as e:
@@ -177,9 +218,7 @@ class HLSBanditFuzz:
                         raise ve
 
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self._log_debug(f"Miter generation failed: {e}")
+            self.utils.log_debug(f"Miter generation failed: {e}")
             return None
 
     def _convert_miter_to_aig(self, miter_directory):
@@ -210,7 +249,7 @@ class HLSBanditFuzz:
     def _run_ric3(self, aig_file):
         """Run rIC3 solver and return solving time"""
         try:
-            cmd = ["./rIC3-code/target/release/rIC3", aig_file]
+            cmd = ["../rIC3-code/target/release/rIC3", aig_file]
             start_time = time.time()
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             solve_time = time.time() - start_time
@@ -228,9 +267,13 @@ class HLSBanditFuzz:
             self.utils.log_debug(f"rIC3 failed: {e}")
             return float('inf')
 
-    def _generate_robust_initial_graph(self):
+    def _generate_robust_initial_graph(self, action_count=None):
         """Generate initial graph with guaranteed sequential logic structure"""
         try:
+            # Use provided action count or default to best graph's action count
+            if action_count is None:
+                action_count = self.best_graph_action_count
+
             with self.utils.suppress_output():
                 # Reseed RNG to ensure a different graph each generation while keeping determinism
                 self.generation_count += 1
@@ -239,7 +282,11 @@ class HLSBanditFuzz:
                 self.graph_manager.seed = derived_seed  #  keep pragma derivations consistent
 
                 self.graph_manager._reset_all()
-                success = self.graph_manager.generate_random_graph(action_number_total=100)
+                success = self.graph_manager.generate_random_graph(action_number_total=action_count)
+
+            # Record the action count used for this graph
+            if success:
+                self.current_graph_action_count = action_count
 
             if success:
                 op_nodes = self.graph_manager._get_op_node_list()
@@ -258,6 +305,9 @@ class HLSBanditFuzz:
         """Main BanditFuzz fuzzing loop with simplified output"""
         print("Starting HLS BanditFuzz...")
 
+        # mark start time for measuring time to first TIMEOUT
+        self._fuzz_start_time = time.time()
+
         # Generate and validate initial graph
         if not self._initialize_with_valid_graph():
             print("Failed to generate valid initial graph")
@@ -269,25 +319,25 @@ class HLSBanditFuzz:
 
         while successful_iterations < self.max_iter:
             total_attempts += 1
-            
+
             # Strategy selection and execution
             strategy = self.strategy_agent.select_action()
             baseline_performance = self.current_working_performance if strategy == 1 else self.best_performance_margin
-            
+
             new_graph, generation_success = self._execute_strategy(strategy)
             if not generation_success:
                 continue
 
             # Evaluate new graph
             performance_margin, success = self.run_hls_pipeline_and_evaluate(new_graph)
-            
+
             if success == "RETRY" or not success:
                 self._handle_evaluation_failure(strategy, success)
                 continue
 
             # Process successful evaluation
             successful_iterations += 1
-            self._process_successful_iteration(successful_iterations, strategy, new_graph, 
+            self._process_successful_iteration(successful_iterations, strategy, new_graph,
                                             performance_margin, baseline_performance)
 
         # Final summary
@@ -296,19 +346,22 @@ class HLSBanditFuzz:
 
     def _initialize_with_valid_graph(self):
         """Initialize with a valid non-combinational graph"""
-        if not self._generate_robust_initial_graph():
+        if not self._generate_robust_initial_graph(action_count=self.best_graph_action_count):
             return False
 
         self.best_graph = copy.deepcopy(self.graph_manager.program_graph)
-        
+        # Record the initial action count used
+        self.best_graph_action_count = self.current_graph_action_count
+
         # Retry until we get a valid sequential circuit
         max_retries = 5
         for _ in range(max_retries):
             self.best_performance_margin, success = self.run_hls_pipeline_and_evaluate(self.best_graph)
-            
+
             if success == "RETRY":
-                if self._generate_robust_initial_graph():
+                if self._generate_robust_initial_graph(action_count=self.best_graph_action_count):
                     self.best_graph = copy.deepcopy(self.graph_manager.program_graph)
+                    self.best_graph_action_count = self.current_graph_action_count
                     continue
                 else:
                     return False
@@ -328,8 +381,8 @@ class HLSBanditFuzz:
         """Execute selected strategy: generate new graph or mutate existing"""
         if strategy == 0:  # Generate new graph
             if not self.verbose:
-                print("Generating new graph...")
-            if self._generate_robust_initial_graph():
+                print(f"Generating new graph with {self.best_graph_action_count} actions...")
+            if self._generate_robust_initial_graph(action_count=self.best_graph_action_count):
                 self._reset_working_graph()
                 return copy.deepcopy(self.graph_manager.program_graph), True
             return None, False
@@ -340,7 +393,7 @@ class HLSBanditFuzz:
                 if not self.verbose:
                     print(f"Resetting due to stagnation ({self.stagnation_counter} iterations)")
                 self._reset_working_graph()
-            
+
             action_idx = self.action_agent.select_action()
             return self._mutate_graph_incremental(action_idx), True
 
@@ -355,13 +408,13 @@ class HLSBanditFuzz:
         # Calculate improvements
         global_improvement = performance_margin > self.best_performance_margin
         local_improvement = performance_margin > baseline_performance
-        
+
         # Basic output for non-verbose mode
         graph_size = new_graph.number_of_nodes()
         time_str = f"{performance_margin:.3f}s" if performance_margin != float('inf') else "timeout"
         if not self.verbose:
             print(f"Iteration {iteration}/{self.max_iter}: Graph size: {graph_size}, rIC3 time: {time_str}")
-        
+
         # Update best graph if globally improved
         if global_improvement:
             if not self.verbose:
@@ -369,13 +422,28 @@ class HLSBanditFuzz:
             self.best_graph = new_graph
             self.best_performance_margin = performance_margin
             self.stagnation_counter = 0
-            
+
+            # Update best graph action count
+            if strategy == 0:  # New graph generation
+                self.best_graph_action_count = self.current_graph_action_count
+                if not self.verbose:
+                    print(f"Updated best graph action count to: {self.best_graph_action_count}")
+            elif strategy == 1:  # Mutation
+                # For mutations, the action count is the original best graph action count plus mutations
+                original_action_count = self.best_graph_action_count
+                total_action_count = original_action_count + len(self.mutation_history)
+                self.best_graph_action_count = total_action_count
+                if not self.verbose:
+                    print(f"Updated best graph action count to: {self.best_graph_action_count} (base: {original_action_count} + mutations: {len(self.mutation_history)})")
+
             if strategy == 1:
                 self.current_working_graph = copy.deepcopy(new_graph)
                 self.current_working_performance = performance_margin
-            
+
             self.utils.save_best_graph_info(self.best_performance_margin, self.best_graph,
-                                           self.mutation_history, self.stagnation_counter)
+                                           self.mutation_history, self.stagnation_counter,
+                                           self.best_graph_action_count)
+            if strategy == 1: self.mutation_history = []
         elif local_improvement and strategy == 1:
             if not self.verbose:
                 print(f"Local improvement: {performance_margin:.3f}s (was {self.current_working_performance:.3f}s)")
@@ -389,6 +457,12 @@ class HLSBanditFuzz:
         self.strategy_agent.reward(local_improvement)
         if strategy == 1:
             self.action_agent.reward(local_improvement)
+        # End-of-iteration timestamp and separator
+        if not self.verbose:
+            end_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"Iteration {iteration} ended at: {end_ts}")
+            print("-------")
+
 
     def _mutate_graph_incremental(self, action_idx):
         """Incrementally mutate current working graph"""
@@ -400,7 +474,7 @@ class HLSBanditFuzz:
             self.graph_manager.program_graph = copy.deepcopy(self.current_working_graph)
             action = self.actions[action_idx]
             action_name = getattr(action, '__name__', f"action_{action_idx}")
-            
+
             success = action()
             if success:
                 self.graph_manager._make_single_output()
