@@ -1,4 +1,4 @@
-"""Hybrid Evolutionary Bandit Fuzzing - Minimal Version."""
+"""Hybrid Evolutionary Bandit Fuzzing"""
 
 import os, time, subprocess, copy, random
 from agents import ThompsonSampling
@@ -10,7 +10,7 @@ from utils import BanditFuzzUtils
 
 
 class HLSBanditFuzz:
-    def __init__(self, output_dir="./output", seed=114514, verbose=False):
+    def __init__(self, output_dir="./output", seed=114513, verbose=False):
         # Components
         self.graph_mgr = RandomGraphManager(seed=seed)
         self.hls = VitisHLSCompiler(working_dir=output_dir)
@@ -61,10 +61,11 @@ class HLSBanditFuzz:
             # Evaluate
             perf, status = self._eval(graph)
             if status == "RETRY" or not status:
-                self._neg_reward(strat)
+                # Technical failure - don't penalize agents, just skip
+                print("  (evaluation failed, skipping)")
                 continue
             
-            # Update pool
+            # Update pool and give feedback based on performance
             ok += 1
             self._update(strat, graph, perf, baseline)
         
@@ -81,7 +82,7 @@ class HLSBanditFuzz:
             return child, parent_perf
         else:  # Inject
             avg = sum(g.number_of_nodes() for g, _ in self.pool) / len(self.pool) if self.pool else 100
-            target = max(50, int(avg))
+            target = min(50, int(avg))
             if not self._gen(target):
                 return None, float('-inf')
             fresh = copy.deepcopy(self.graph_mgr.program_graph)
@@ -89,7 +90,7 @@ class HLSBanditFuzz:
             return fresh, pool_avg
 
     def _update(self, strat, graph, perf, baseline):
-        """Update pool if improved."""
+        """Update pool if improved, and give feedback based on performance."""
         improved = perf > baseline
         pstr = f"{perf:.3f}s" if perf != float('inf') else "timeout"
         bstr = f"{baseline:.3f}s" if baseline != float('inf') else "timeout"
@@ -102,13 +103,9 @@ class HLSBanditFuzz:
                 self.action_agent.reward(True)
         else:
             print(f"  ✗ {pstr} <= {bstr}")
-            self._neg_reward(strat)
-
-    def _neg_reward(self, strat):
-        """Give negative reward."""
-        self.strategy_agent.reward(False)
-        if strat == 0:
-            self.action_agent.reward(False)
+            self.strategy_agent.reward(False)
+            if strat == 0:
+                self.action_agent.reward(False)
 
     def _mutate(self, parent):
         """Mutate parent graph."""
@@ -135,13 +132,17 @@ class HLSBanditFuzz:
     def _init(self):
         """Initialize pool with one valid graph."""
         for _ in range(5):
-            if not self._gen(100):
+            if not self._gen(20):
                 continue
             g = copy.deepcopy(self.graph_mgr.program_graph)
+            print(f"Begin eval")
             perf, status = self._eval(g)
             if status == "RETRY":
+                print(f"Retry...")
+                # assert False
                 continue
             elif status:
+                print(f"Success...Add to pool")
                 self.pool.append((g, perf))
                 return True
         return False
@@ -190,6 +191,7 @@ class HLSBanditFuzz:
         try:
             with self.utils.suppress_output():
                 self.graph_mgr.program_graph = g
+                # self.graph_mgr._copy_graph_and_insert_pragmas()
                 f1, f2 = f"{self.out_dir}/b1.cpp", f"{self.out_dir}/b2.cpp"
                 self.graph_mgr.dump_cpp_comparsion(f1, f2)
             return [f1, f2] if os.path.exists(f1) and os.path.exists(f2) else None
