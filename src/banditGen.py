@@ -76,13 +76,17 @@ class HLSBanditFuzz:
         if strat == 0:  # Evolve
             if not self.pool:
                 return None, float('-inf')
-            parent, parent_perf = random.choice(self.pool)
+            # mask out the TO cases
+            pool_case2evolve = [(g, p) for g, p in self.pool if p != float('inf')]
+            if not pool_case2evolve:
+                return None, float('-inf')
+            parent, parent_perf = random.choice(pool_case2evolve)
             print(f"  Parent: {parent.number_of_nodes()} nodes")
             child = self._mutate(parent)
             return child, parent_perf
         else:  # Inject
             avg = sum(g.number_of_nodes() for g, _ in self.pool) / len(self.pool) if self.pool else 100
-            target = min(50, int(avg))
+            target = min(50, int(avg)) # key hyperparameter
             if not self._gen(target):
                 return None, float('-inf')
             fresh = copy.deepcopy(self.graph_mgr.program_graph)
@@ -132,7 +136,7 @@ class HLSBanditFuzz:
     def _init(self):
         """Initialize pool with one valid graph."""
         for _ in range(5):
-            if not self._gen(20):
+            if not self._gen(20): # key hyperparameter
                 continue
             g = copy.deepcopy(self.graph_mgr.program_graph)
             print(f"Begin eval")
