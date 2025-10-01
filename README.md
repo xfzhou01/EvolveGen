@@ -95,6 +95,8 @@ python src/main.py [OPTIONS]
 
 4. **Run BanditFuzz for performance optimization:**
    ```bash
+   python src/main.py --seed 114512 --bandit-fuzz --bandit-iterations 5 
+   # or 
    python src/main.py --bandit-fuzz --bandit-iterations 50 --verbose
    ```
 
