@@ -71,7 +71,7 @@ class BanditFuzzUtils:
         perfs = [p for _, p in pool if p != float('inf')]
         if perfs:
             print(f"Avg perf: {sum(perfs)/len(perfs):.3f}s, Best: {max(perfs):.3f}s")
-            print(f"Timeouts: {sum(1 for _, p in pool if p == float('inf'))}")
+            print(f"Good cases: {sum(1 for _, p in pool if p == 3600.0)}")
         
         sizes = [g.number_of_nodes() for g, _ in pool]
         if sizes:
