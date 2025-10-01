@@ -122,12 +122,28 @@ class HLSBanditFuzz:
         return copy.deepcopy(self.graph_mgr.program_graph)
 
     def _gen(self, n):
-        """Generate fresh graph with n actions."""
+        """Generate fresh graph with n actions.
+        
+        First generation (init) uses fixed seed for reproducibility.
+        Subsequent generations use truly random seeds.
+        """
         try:
             with self.utils.suppress_output():
                 self.gen_count += 1
-                random.seed(self.seed + self.gen_count)
-                self.graph_mgr.seed = self.seed + self.gen_count
+                
+                # Only first generation uses fixed seed
+                if self.gen_count == 1:
+                    random.seed(self.seed)
+                    self.graph_mgr.seed = self.seed
+                    print(f"[Gen {self.gen_count}] Using fixed seed: {self.seed}")
+                else:
+                    # Use truly random seed (system time-based)
+                    random_seed = int(time.time() * 1000000) % (2**31)
+                    random.seed(random_seed)
+                    self.graph_mgr.seed = random_seed
+                    if self.verbose:
+                        print(f"[Gen {self.gen_count}] Using random seed: {random_seed}")
+                
                 self.graph_mgr._reset_all()
                 ok = self.graph_mgr.generate_random_graph(action_number_total=n)
             return ok and len(self.graph_mgr._get_op_node_list()) >= 3
