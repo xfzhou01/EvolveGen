@@ -34,3 +34,4 @@ test/output_seed_42.cpp
 deprecated/
 
 early_predictor/target/release
+early_predictor/target/debug/

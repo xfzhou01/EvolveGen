@@ -9,8 +9,6 @@ use serde::Serialize;
 use std::io::Write;
 use std::thread;
 use std::time::Duration;
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
 /*
 For achieving the feature extraction, we need to use the ABC tool.
@@ -92,20 +90,12 @@ impl AigFeatureExtractor {
         features.save_to_json(&json_path)?;
         
         // Also save the features JSON in Python-compatible format (circuit_name.json)
-        if let Some(parent_dir) = self.work_dir.parent() {
-            let py_json_path = parent_dir.join(format!("{}.json", circuit_name));
-            features.save_to_json(&py_json_path)
-                .context(format!("Failed to save Python-compatible JSON: {}", py_json_path.display()))?;
-        }
+        // if let Some(parent_dir) = self.work_dir.parent() {
+        //     let py_json_path = parent_dir.join(format!("{}.json", circuit_name));
+        //     features.save_to_json(&py_json_path)
+        //         .context(format!("Failed to save Python-compatible JSON: {}", py_json_path.display()))?;
+        // }
 
-        // If aig_graph_dir is set, generate PyG tensor data using PyO3
-        // Files are already generated in run_abc_commands
-        if let Some(ref graph_dir) = self.aig_graph_dir {
-            let circuit_graph_dir = graph_dir.join(&circuit_name);
-            
-            // Try to generate PyG tensor object using PyO3
-            let _ = self.generate_pyg_data(&circuit_graph_dir, &circuit_name);
-        }
 
         Ok(features)
     }
@@ -120,11 +110,21 @@ impl AigFeatureExtractor {
         abc.execute_command("&get; &detect_faha -o detect_faha_output.json; &put");
         
         // Move the file to our target location
-        if let Ok(content) = fs::read_to_string("detect_faha_output.json") {
-            fs::write(&faha_path, content)?;
-            // Assert FAHA detection output was created successfully
-            assert!(faha_path.exists(), "FAHA detection output JSON not found after ABC command: {:?}", faha_path);
+        let tmp_faha = PathBuf::from("detect_faha_output.json");
+        if tmp_faha.exists() {
+            if let Err(rename_err) = fs::rename(&tmp_faha, &faha_path) {
+                let span = format!("Failed to move FAHA JSON from {} to {}", tmp_faha.display(), faha_path.display());
+                let content = fs::read_to_string(&tmp_faha)
+                    .with_context(|| span.clone())?;
+                fs::write(&faha_path, &content)
+                    .with_context(|| span.clone())?;
+                fs::remove_file(&tmp_faha)
+                    .with_context(|| format!("Failed to remove original FAHA JSON after copy: {}", tmp_faha.display()))?;
+            }
         }
+
+        // Assert FAHA detection output was created successfully
+        assert!(faha_path.exists(), "FAHA detection output JSON not found after ABC command: {:?}", faha_path);
 
         // Determine paths for edge list and node features
         // If aig_graph_dir is specified, generate PyG-compatible filenames
@@ -171,14 +171,19 @@ impl AigFeatureExtractor {
 
         // Look for the PDR JSON in several plausible locations
         let circuit_name = Self::get_case_name(&self.circuit_path);
-        let candidates: [PathBuf; 4] = [
-            PathBuf::from(format!("{}_pdr.json", circuit_name)),                                    // CWD: <name>_pdr.json
-            PathBuf::from("pdr_stats.json"),                                                        // CWD: fallback name
-            self.circuit_path.parent().unwrap_or(Path::new(".")).join(format!("{}_pdr.json", circuit_name)), // alongside input .aig
-            self.circuit_path.parent().unwrap_or(Path::new(".")).join("pdr_stats.json"),                     // alongside input .aig (fallback)
+        let mut candidates = vec![
+            PathBuf::from(format!("{}_pdr.json", circuit_name)),               // CWD: <name>_pdr.json
+            PathBuf::from("_pdr.json"),                                      // CWD: fallback with empty prefix
+            PathBuf::from("pdr_stats.json"),                                 // CWD: fallback name
         ];
 
-        let src = candidates.iter().find(|p| p.exists()).cloned();
+        if let Some(parent) = self.circuit_path.parent() {
+            candidates.push(parent.join(format!("{}_pdr.json", circuit_name)));
+            candidates.push(parent.join("_pdr.json"));
+            candidates.push(parent.join("pdr_stats.json"));
+        }
+
+        let src = candidates.into_iter().find(|p| p.exists());
         let Some(src_path) = src else {
             return Ok(None);
         };
@@ -186,13 +191,14 @@ impl AigFeatureExtractor {
         // Move JSON into the work directory
         let dst = self.work_dir.join("pdr_stats.json");
         if src_path != dst {
-            if let Err(e) = fs::rename(&src_path, &dst) {
-                // Fallback: copy then remove original (e.g., cross-device move)
+            if let Err(rename_err) = fs::rename(&src_path, &dst) {
+                let span = format!("Failed to move PDR JSON from {} to {}", src_path.display(), dst.display());
                 let content = fs::read_to_string(&src_path)
-                    .context(format!("Failed to read PDR JSON: {}", src_path.display()))?;
+                    .with_context(|| span.clone())?;
                 fs::write(&dst, &content)
-                    .context(format!("Failed to write PDR JSON to {}", dst.display()))?;
-                let _ = fs::remove_file(&src_path);
+                    .with_context(|| span.clone())?;
+                fs::remove_file(&src_path)
+                    .with_context(|| format!("Failed to remove original PDR JSON after copy: {}", src_path.display()))?;
             }
         }
 
@@ -205,41 +211,6 @@ impl AigFeatureExtractor {
         Ok(Some(json))
     }
 
-    /// Generate PyG compatible data using Python aig_to_pyg module
-    fn generate_pyg_data(&self, circuit_graph_dir: &Path, circuit_name: &str) -> Result<()> {
-        // Use PyO3 to call aig_to_pyg.py to generate PyG data directly
-        // This is wrapped in a result to handle Python errors
-        let py_result: PyResult<()> = Python::with_gil(|py| {
-            // Try to import solver_tuner.data_utils.aig_to_pyg
-            let aig_to_pyg = py.import("solver_tuner.data_utils.aig_to_pyg")?;
-            
-            // Call load_aig_as_pyg function
-            let base_path = circuit_graph_dir.parent().unwrap_or(Path::new(""));
-            let pyg_data = aig_to_pyg.call_method1(
-                "load_aig_as_pyg", 
-                (base_path.to_str().unwrap(), circuit_name)
-            )?;
-            
-            // Cache the PyG data
-            let cache_dir = circuit_graph_dir.join("cache");
-            fs::create_dir_all(&cache_dir)?;
-            
-            aig_to_pyg.call_method1(
-                "cache_aig_graph",
-                (pyg_data, cache_dir.to_str().unwrap(), circuit_name)
-            )?;
-            
-            Ok(())
-        });
-        
-        // Convert PyO3 errors to anyhow errors
-        if let Err(e) = py_result {
-            println!("Warning: PyO3 error when generating PyG data: {}", e);
-            println!("Graph files were generated successfully but PyG object could not be created.");
-        }
-            
-        Ok(())
-    }
 
     /// Get case name from file path
     fn get_case_name(path: &Path) -> String {

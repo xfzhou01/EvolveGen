@@ -2,16 +2,9 @@ use std::ffi::{c_void, CString};
 use std::sync::Mutex;
 use std::ffi::{c_char, CStr};
 use lazy_static::lazy_static;
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use std::collections::HashMap;
 
 pub mod feature_extraction;
-
-#[pymodule]
-fn solver_param_predictor(_py: Python, m: &PyModule) -> PyResult<()> {
-    Ok(())
-}
 
 lazy_static! {
     static ref OUTPUT_BUFFER: Mutex<String> = Mutex::new(String::new());
