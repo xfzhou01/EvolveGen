@@ -31,6 +31,7 @@ class HLSBanditFuzz:
         self.verbose = verbose
         self.out_dir = output_dir
         self.max_iter = 100
+        self.timeout_value = 3600.0  # Use 3600s for timeout cases
         os.makedirs(output_dir, exist_ok=True)
 
     def fuzz(self):
@@ -60,7 +61,7 @@ class HLSBanditFuzz:
             
             # Evaluate
             perf, status = self._eval(graph)
-            if status == "RETRY" or not status:
+            if not status:
                 # Technical failure - don't penalize agents, just skip
                 print("  (evaluation failed, skipping)")
                 continue
@@ -75,16 +76,20 @@ class HLSBanditFuzz:
         """Execute strategy: 0=Evolve, 1=Inject."""
         if strat == 0:  # Evolve
             if not self.pool:
-                return None, float('-inf')
-            parent, parent_perf = random.choice(self.pool)
-            print(f"  Parent: {parent.number_of_nodes()} nodes")
+                return None, -1
+            # Mask out timeout cases (>= timeout_value)
+            pool_case2evolve = [(g, p) for g, p in self.pool if p < self.timeout_value]
+            if not pool_case2evolve:
+                return None, -1
+            parent, parent_perf = random.choice(pool_case2evolve)
+            print(f"  Parent: {parent.number_of_nodes()} nodes, perf={parent_perf:.3f}s")
             child = self._mutate(parent)
             return child, parent_perf
         else:  # Inject
             avg = sum(g.number_of_nodes() for g, _ in self.pool) / len(self.pool) if self.pool else 100
-            target = min(50, int(avg))
+            target = max(30, int(avg)) 
             if not self._gen(target):
-                return None, float('-inf')
+                return None, -1
             fresh = copy.deepcopy(self.graph_mgr.program_graph)
             pool_avg = self._pool_avg()
             return fresh, pool_avg
@@ -92,8 +97,8 @@ class HLSBanditFuzz:
     def _update(self, strat, graph, perf, baseline):
         """Update pool if improved, and give feedback based on performance."""
         improved = perf > baseline
-        pstr = f"{perf:.3f}s" if perf != float('inf') else "timeout"
-        bstr = f"{baseline:.3f}s" if baseline != float('inf') else "timeout"
+        pstr = f"{perf:.3f}s" if perf < self.timeout_value else "timeout"
+        bstr = f"{baseline:.3f}s" if baseline >= 0 and baseline < self.timeout_value else "timeout" if baseline >= self.timeout_value else "none"
         
         if improved:
             self.pool.append((graph, perf))
@@ -117,12 +122,28 @@ class HLSBanditFuzz:
         return copy.deepcopy(self.graph_mgr.program_graph)
 
     def _gen(self, n):
-        """Generate fresh graph with n actions."""
+        """Generate fresh graph with n actions.
+        
+        First generation (init) uses fixed seed for reproducibility.
+        Subsequent generations use truly random seeds.
+        """
         try:
             with self.utils.suppress_output():
                 self.gen_count += 1
-                random.seed(self.seed + self.gen_count)
-                self.graph_mgr.seed = self.seed + self.gen_count
+                
+                # Only first generation uses fixed seed
+                if self.gen_count == 1:
+                    random.seed(self.seed)
+                    self.graph_mgr.seed = self.seed
+                    print(f"[Gen {self.gen_count}] Using fixed seed: {self.seed}")
+                else:
+                    # Use truly random seed (system time-based)
+                    random_seed = int(time.time() * 1000000) % (2**31)
+                    random.seed(random_seed)
+                    self.graph_mgr.seed = random_seed
+                    if self.verbose:
+                        print(f"[Gen {self.gen_count}] Using random seed: {random_seed}")
+                
                 self.graph_mgr._reset_all()
                 ok = self.graph_mgr.generate_random_graph(action_number_total=n)
             return ok and len(self.graph_mgr._get_op_node_list()) >= 3
@@ -137,61 +158,70 @@ class HLSBanditFuzz:
             g = copy.deepcopy(self.graph_mgr.program_graph)
             print(f"Begin eval")
             perf, status = self._eval(g)
-            if status == "RETRY":
-                print(f"Retry...")
-                # assert False
+            if not status:
+                print(f"Eval failed, retry...")
                 continue
-            elif status:
-                print(f"Success...Add to pool")
-                self.pool.append((g, perf))
-                return True
+            print(f"Success (perf={perf:.3f}s)...Add to pool")
+            self.pool.append((g, perf))
+            return True
         return False
 
     def _pool_avg(self):
         """Average pool performance (exclude timeouts)."""
-        perfs = [p for _, p in self.pool if p != float('inf')]
-        return sum(perfs) / len(perfs) if perfs else float('-inf')
+        perfs = [p for _, p in self.pool if p < self.timeout_value]
+        return sum(perfs) / len(perfs) if perfs else 0.1
 
     def _eval(self, graph):
-        """Run HLS pipeline and evaluate."""
+        """Run HLS pipeline and evaluate.
+        
+        Returns:
+            (perf, status) where:
+            - perf: -1 for failure, 0.0-10.0 for fast solve, 3600.0 for timeout
+            - status: False for failure, True for success (including timeout)
+        """
         try:
             # C++
             cpp = self._cpp(graph)
             if not cpp:
-                return float('-inf'), False
+                return -1, False
             
             # HLS
             vs = self._hls(cpp)
             if not vs:
-                return float('-inf'), False
+                return -1, False
             
             # Miter
             m = self._miter(vs)
             if not m:
-                return float('-inf'), False
+                return -1, False
             elif m == "COMB":
-                return float('-inf'), "RETRY"
+                # Combinational circuit, can't verify - retry
+                return -1, False
             
             # AIG
             aig = self._aig(m)
             if not aig:
-                return float('-inf'), False
+                return -1, False
             
             # rIC3
-            r = self._ric3(aig)
-            if r == "TIMEOUT":
+            perf = self._ric3(aig)
+            if perf < 0:
+                # Solver error
+                return -1, False
+            elif perf >= self.timeout_value:
+                # Timeout - this is good!
                 self.utils.dump_timeout(graph)
-                return float('inf'), True
-            
-            return r, True
+                return perf, True
+            else:
+                # Fast solve
+                return perf, True
         except:
-            return float('-inf'), False
+            return -1, False
 
     def _cpp(self, g):
         try:
             with self.utils.suppress_output():
                 self.graph_mgr.program_graph = g
-                # self.graph_mgr._copy_graph_and_insert_pragmas()
                 f1, f2 = f"{self.out_dir}/b1.cpp", f"{self.out_dir}/b2.cpp"
                 self.graph_mgr.dump_cpp_comparsion(f1, f2)
             return [f1, f2] if os.path.exists(f1) and os.path.exists(f2) else None
@@ -252,6 +282,13 @@ class HLSBanditFuzz:
             return None
 
     def _ric3(self, aig):
+        """Run rIC3 solver.
+        
+        Returns:
+            - elapsed time (0.0-10.0) if solved
+            - 3600.0 if timeout or no result
+            - -1 if error
+        """
         try:
             start = time.time()
             r = subprocess.run(
@@ -259,8 +296,17 @@ class HLSBanditFuzz:
                 capture_output=True, text=True, timeout=10
             )
             elapsed = time.time() - start
-            return elapsed if "SAT" in r.stdout or "UNSAT" in r.stdout else float('inf')
+            
+            # Check if solver gave a result
+            if "SAT" in r.stdout or "UNSAT" in r.stdout:
+                return elapsed
+            
+            # Solver ran but gave no result - treat as timeout
+            return 3600.0
+            
         except subprocess.TimeoutExpired:
-            return "TIMEOUT"
+            # Timeout after 10s - treat as very hard case
+            return 3600.0
         except:
-            return float('inf')
+            # Other errors (solver crash, file not found, etc)
+            return -1
