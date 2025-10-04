@@ -51,17 +51,17 @@ exclude_columns = [
     'circuit_name',
     'dynamic_features$circuit_name',  # Circuit path (string)
     'dynamic_features$pdr$result',     # Categorical result (SAT/UNSAT/UNDEC)
-    # 'dynamic_features$pdr$frame_clause_counts',  # List/array data (not numeric)
+    'dynamic_features$pdr$frame_clause_counts',  # List/array data (not numeric)
 ] + label_columns
 
 # Get all feature columns
 all_columns = df.columns.tolist()
 feature_columns = [col for col in all_columns if col not in exclude_columns]
 
-print(f"\nTotal columns: {len(all_columns)}")
-print(f"Excluded columns: {len(exclude_columns)}")
-print(f"Feature columns: {len(feature_columns)}")
-print(f"\nFeature columns: {feature_columns}")
+# print(f"\nTotal columns: {len(all_columns)}")
+# print(f"Excluded columns: {len(exclude_columns)}")
+# print(f"Feature columns: {len(feature_columns)}")
+# print(f"\nFeature columns: {feature_columns}")
 
 # Extract features and labels
 X = df[feature_columns].copy()
@@ -118,7 +118,7 @@ num_round = 100
 trained_models = {}
 
 # Train a separate model for each solver
-for solver_name in label_columns:
+for solver_name in label_columns[1:]:
     print(f"\n{'='*60}")
     print(f"Training model for solver: {solver_name}")
     print(f"{'='*60}")
@@ -137,7 +137,7 @@ for solver_name in label_columns:
     
     # Split train and test sets
     X_train, X_test, y_train, y_test = train_test_split(
-        X_valid, y_valid, test_size=0.2, random_state=42
+        X_valid, y_valid, test_size=0.1, random_state=42
     )
     
     # Initial feature selection using L1 regularization
