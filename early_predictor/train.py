@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.metrics import r2_score
 from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 from sklearn.model_selection import KFold
 from xgboost import XGBRegressor
@@ -73,7 +74,7 @@ def extract_feature_importance(model: XGBRegressor) -> List[Dict[str, float]]:
     ]
 
 
-def evaluate_params(params: Dict[str, float], X: pd.DataFrame, y: pd.Series) -> float:
+def evaluate_params(params: Dict[str, float], X: pd.DataFrame, y: pd.Series) -> Tuple[float, float]:
     model = XGBRegressor(
         objective="reg:squarederror",
         tree_method="hist",
@@ -84,6 +85,7 @@ def evaluate_params(params: Dict[str, float], X: pd.DataFrame, y: pd.Series) -> 
 
     kfold = KFold(n_splits=min(5, len(X)), shuffle=True, random_state=RANDOM_STATE)
     rmses: List[float] = []
+    r2_scores: List[float] = []
     for train_index, valid_index in kfold.split(X):
         X_train, X_valid = X.iloc[train_index], X.iloc[valid_index]
         y_train, y_valid = y.iloc[train_index], y.iloc[valid_index]
@@ -91,10 +93,11 @@ def evaluate_params(params: Dict[str, float], X: pd.DataFrame, y: pd.Series) -> 
         preds = model.predict(X_valid)
         rmse = float(np.sqrt(np.mean((preds - y_valid) ** 2)))
         rmses.append(rmse)
-    return float(np.mean(rmses))
+        r2_scores.append(float(r2_score(y_valid, preds)))
+    return float(np.mean(rmses)), float(np.mean(r2_scores))
 
 
-def tune_hyperparameters(X: pd.DataFrame, y: pd.Series, max_evals: int) -> Tuple[Dict[str, float], float, Trials]:
+def tune_hyperparameters(X: pd.DataFrame, y: pd.Series, max_evals: int) -> Tuple[Dict[str, float], float, float, Trials]:
     space = create_search_space()
 
     def objective(trial_params: Dict[str, float]):
@@ -109,7 +112,7 @@ def tune_hyperparameters(X: pd.DataFrame, y: pd.Series, max_evals: int) -> Tuple
             "gamma": float(trial_params["gamma"]),
             "n_estimators": int(trial_params["n_estimators"]),
         }
-        rmse = evaluate_params(params, X, y)
+        rmse, _ = evaluate_params(params, X, y)
         return {"loss": rmse, "status": STATUS_OK}
 
     trials = Trials()
@@ -126,8 +129,8 @@ def tune_hyperparameters(X: pd.DataFrame, y: pd.Series, max_evals: int) -> Tuple
         "gamma": float(best["gamma"]),
         "n_estimators": int(best["n_estimators"]),
     }
-    best_rmse = evaluate_params(best_params, X, y)
-    return best_params, best_rmse, trials
+    best_rmse, best_r2 = evaluate_params(best_params, X, y)
+    return best_params, best_rmse, best_r2, trials
 
 
 def train_solver_model(X: pd.DataFrame, y: pd.Series, params: Dict[str, float]) -> XGBRegressor:
@@ -154,34 +157,33 @@ def main() -> None:
 
     for solver in SOLVER_TARGETS:
         y = target_df[solver]
-        best_params, best_rmse, trials = tune_hyperparameters(X, y, args.max_evals)
+        best_params, best_rmse, best_r2, trials = tune_hyperparameters(X, y, args.max_evals)
         model = train_solver_model(X, y, best_params)
 
         joblib.dump(model, models_dir / f"{solver}_model.joblib")
 
         feature_importance = extract_feature_importance(model)
         metrics_report[solver] = {
-            "best_rmse": best_rmse,
+            "cv_rmse": best_rmse,
+            "cv_r2": best_r2,
             "best_params": best_params,
             "trial_count": len(trials.trials),
             "feature_importance_gain": feature_importance,
         }
-        print(f"Trained model for {solver} with RMSE={best_rmse:.4f}")
+        print(f"Trained model for {solver} with CV RMSE={best_rmse:.4f}, CV R2={best_r2:.4f}")
         if feature_importance:
             top_preview = ", ".join(
                 f"{item['feature']} ({item['gain_fraction']:.2%})" for item in feature_importance[:5]
             )
             print(f"Top gain features for {solver}: {top_preview}")
+        else:
+            print(f"Top gain features for {solver}: <no features>")
 
     metrics_report["feature_columns"] = feature_columns
     metrics_report["dropped_columns"] = ALL_DROP_COLUMNS
 
     with (args.output_dir / "metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(metrics_report, handle, indent=2)
-
-    feature_metadata_path = args.output_dir / "feature_metadata.json"
-    if feature_metadata_path.exists():
-        feature_metadata_path.unlink()
 
     print(f"Artifacts saved to {args.output_dir.resolve()}")
 
