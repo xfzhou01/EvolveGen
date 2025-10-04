@@ -20,7 +20,7 @@ class HLSBanditFuzz:
         # State
         self.seed = seed
         self.gen_count = 0
-        self.pool = []  # [(graph, perf), ...]
+        self.pool = []  # [(graph, perf, action_count), ...]
         
         # Agents
         self.actions = self.graph_mgr.bandit_action_list
@@ -55,7 +55,7 @@ class HLSBanditFuzz:
             print(f"\n[{ok+1}/{self.max_iter}] {'EVOLVE' if strat==0 else 'INJECT'}")
             
             # Execute
-            graph, baseline = self._exec(strat)
+            graph, baseline, action_count = self._exec(strat)
             if graph is None:
                 continue
             
@@ -68,7 +68,7 @@ class HLSBanditFuzz:
             
             # Update pool and give feedback based on performance
             ok += 1
-            self._update(strat, graph, perf, baseline)
+            self._update(strat, graph, perf, baseline, action_count)
         
         self.utils.print_summary(self.pool, self.max_iter, ok, total)
 
@@ -76,33 +76,33 @@ class HLSBanditFuzz:
         """Execute strategy: 0=Evolve, 1=Inject."""
         if strat == 0:  # Evolve
             if not self.pool:
-                return None, -1
+                return None, -1, 0
             # Mask out timeout cases (>= timeout_value)
-            pool_case2evolve = [(g, p) for g, p in self.pool if p < self.timeout_value]
+            pool_case2evolve = [(g, p, a) for g, p, a in self.pool if p < self.timeout_value]
             if not pool_case2evolve:
-                return None, -1
-            parent, parent_perf = random.choice(pool_case2evolve)
-            print(f"  Parent: {parent.number_of_nodes()} nodes, perf={parent_perf:.3f}s")
+                return None, -1, 0
+            parent, parent_perf, parent_actions = random.choice(pool_case2evolve)
+            print(f"  Parent: {parent.number_of_nodes()} nodes, {parent_actions} actions, perf={parent_perf:.3f}s")
             child = self._mutate(parent)
-            return child, parent_perf
+            return child, parent_perf, parent_actions + 1
         else:  # Inject
-            avg = sum(g.number_of_nodes() for g, _ in self.pool) / len(self.pool) if self.pool else 100
+            avg = sum(a for _, _, a in self.pool) / len(self.pool) if self.pool else 100
             target = max(30, int(avg)) 
             if not self._gen(target):
-                return None, -1
+                return None, -1, 0
             fresh = copy.deepcopy(self.graph_mgr.program_graph)
             pool_avg = self._pool_avg()
-            return fresh, pool_avg
+            return fresh, pool_avg, target
 
-    def _update(self, strat, graph, perf, baseline):
+    def _update(self, strat, graph, perf, baseline, action_count):
         """Update pool if improved, and give feedback based on performance."""
         improved = perf > baseline
         pstr = f"{perf:.3f}s" if perf < self.timeout_value else "timeout"
         bstr = f"{baseline:.3f}s" if baseline >= 0 and baseline < self.timeout_value else "timeout" if baseline >= self.timeout_value else "none"
         
         if improved:
-            self.pool.append((graph, perf))
-            print(f"  ✓ {pstr} > {bstr}, pool={len(self.pool)}")
+            self.pool.append((graph, perf, action_count))
+            print(f"  ✓ {pstr} > {bstr}, pool={len(self.pool)}, actions={action_count}")
             self.strategy_agent.reward(True)
             if strat == 0:
                 self.action_agent.reward(True)
@@ -153,7 +153,8 @@ class HLSBanditFuzz:
     def _init(self):
         """Initialize pool with one valid graph."""
         for _ in range(5):
-            if not self._gen(20):
+            initial_actions = 20
+            if not self._gen(initial_actions):
                 continue
             g = copy.deepcopy(self.graph_mgr.program_graph)
             print(f"Begin eval")
@@ -161,14 +162,14 @@ class HLSBanditFuzz:
             if not status:
                 print(f"Eval failed, retry...")
                 continue
-            print(f"Success (perf={perf:.3f}s)...Add to pool")
-            self.pool.append((g, perf))
+            print(f"Success (perf={perf:.3f}s, actions={initial_actions})...Add to pool")
+            self.pool.append((g, perf, initial_actions))
             return True
         return False
 
     def _pool_avg(self):
         """Average pool performance (exclude timeouts)."""
-        perfs = [p for _, p in self.pool if p < self.timeout_value]
+        perfs = [p for _, p, _ in self.pool if p < self.timeout_value]
         return sum(perfs) / len(perfs) if perfs else 0.1
 
     def _eval(self, graph):

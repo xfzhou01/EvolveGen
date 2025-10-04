@@ -1,4 +1,4 @@
-"""Minimal utilities for HLS BanditFuzz."""
+"""utilities for HLS BanditFuzz."""
 
 import os, sys, shutil, datetime, pickle
 from contextlib import contextmanager
@@ -47,7 +47,7 @@ class BanditFuzzUtils:
                 if os.path.exists(src):
                     dst = os.path.join(folder, item)
                     if os.path.isdir(src):
-                        shutil.copertree(src, dst, dirs_exist_ok=True)
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
                     else:
                         shutil.copy2(src, dst)
             
@@ -68,12 +68,20 @@ class BanditFuzzUtils:
         print(f"Completed: {successful}/{target} ({successful/total*100:.1f}% success)")
         print(f"Pool size: {len(pool)}")
         
-        perfs = [p for _, p in pool if p != float('inf')]
+        # Updated: unpack triple (graph, perf, action_count)
+        perfs = [p for _, p, _ in pool if p != float('inf')]
         if perfs:
             print(f"Avg perf: {sum(perfs)/len(perfs):.3f}s, Best: {max(perfs):.3f}s")
-            print(f"Good cases: {sum(1 for _, p in pool if p == 3600.0)}")
+            print(f"Good cases: {sum(1 for _, p, _ in pool if p == 3600.0)}")
         
-        sizes = [g.number_of_nodes() for g, _ in pool]
+        # Updated: node count statistics
+        sizes = [g.number_of_nodes() for g, _, _ in pool]
         if sizes:
             print(f"Avg size: {sum(sizes)/len(sizes):.1f}, Range: {min(sizes)}-{max(sizes)}")
+        
+        # New: action count statistics
+        actions = [a for _, _, a in pool]
+        if actions:
+            print(f"Avg actions: {sum(actions)/len(actions):.1f}, Range: {min(actions)}-{max(actions)}")
+        
         print("="*60)
