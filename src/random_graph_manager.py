@@ -663,6 +663,7 @@ class RandomGraphManager(GraphManager):
 
     def _insert_pragmas_to_graph_mode_basic(self, program_graph_to_be_inserted:nx.DiGraph, graph_index):
         # basic insertion, no optimization
+        print("[INFO] call RandomGraphManager::_insert_pragmas_to_graph_mode_basic")
         for node in program_graph_to_be_inserted.nodes():
             if isinstance(node, LoopNode):
                 self.rand_pg_gen.generate_pragma_for_loop_node_no_opt(node)
@@ -680,7 +681,7 @@ class RandomGraphManager(GraphManager):
         # if the program graph contain loops
         #   for inner loops, do pipeline
         #   let outer loops flatten automatically
-
+        print("[INFO] call RandomGraphManager::_insert_pragmas_to_graph_mode_seq")
         is_contain_loops = False
         for node in program_graph_to_be_inserted.nodes():
             if isinstance(node, LoopNode):
@@ -785,6 +786,9 @@ class RandomGraphManager(GraphManager):
         self._insert_pragmas_to_graph_mode_seq(
             self.program_graph_copy_2,
             graph_index=2)
+        
+        # print("self.function_pipeline_1:", self.function_pipeline_1)
+        # print("self.function_pipeline_2:", self.function_pipeline_2)
         
         # Restore random state
         random.setstate(current_state)
