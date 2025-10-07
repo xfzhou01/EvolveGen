@@ -35,3 +35,5 @@ deprecated/
 
 early_predictor/target/release
 early_predictor/target/debug/
+early_predictor/train.csv
+early_predictor/artifacts/
