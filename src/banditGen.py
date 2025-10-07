@@ -36,7 +36,7 @@ class HLSBanditFuzz:
         self.max_iter = 100
         self.timeout_value = 3600.0  # Use 3600s for timeout cases
         self.mode = mode  # "naive" or "predict"
-        self.solver = solver  # "abc", "ic3ref", "ric3"
+        self.solver = solver  # "abc", "ic3ref", "ric3", "pono"
         os.makedirs(output_dir, exist_ok=True)
 
     def fuzz(self):
@@ -309,7 +309,19 @@ class HLSBanditFuzz:
                     return perf, True, aig_fp
             else:
                 # Naive mode: actual solving
-                perf = self._ric3(aig)
+                solvers = {
+                    "ric3": self._ric3,
+                    "abc": self._abc,
+                    "ic3ref": self._ic3ref,
+                    "pono": self._pono
+                }
+                solver_func = solvers.get(self.solver)
+                if not solver_func:
+                    print(f"  ✗ Unknown solver: {self.solver}")
+                    return -1, False, None
+
+                perf = solver_func(aig, btor2) # Pass both file types
+
                 if perf < 0:
                     # Solver error
                     return -1, False, None
@@ -551,7 +563,7 @@ write_btor -s {btor2_file}
             except:
                 pass  # Ignore cleanup errors
             
-    def _ric3(self, aig):
+    def _ric3(self, aig, btor2):
         """Run rIC3 solver.
         
         Returns:
@@ -579,4 +591,51 @@ write_btor -s {btor2_file}
             return 3600.0
         except:
             # Other errors (solver crash, file not found, etc)
+            return -1
+
+    def _abc(self, aig, btor2):
+        """Run abc solver."""
+        try:
+            start = time.time()
+            cmd = ["abc", "-c", f"&r {aig}; &put; fold; pdr"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            elapsed = time.time() - start
+            if "Property proved" in r.stdout or "cex" in r.stdout:
+                return elapsed
+            return 3600.0
+        except subprocess.TimeoutExpired:
+            return 3600.0
+        except:
+            return -1
+
+    def _ic3ref(self, aig, btor2):
+        """Run ic3ref solver."""
+        try:
+            start = time.time()
+            with open(aig, 'r') as f_in:
+                r = subprocess.run(["./IC3"], stdin=f_in, capture_output=True, text=True, timeout=10)
+            elapsed = time.time() - start
+            if "SAT" in r.stdout or "UNSAT" in r.stdout:
+                return elapsed
+            return 3600.0
+        except subprocess.TimeoutExpired:
+            return 3600.0
+        except:
+            return -1
+
+    def _pono(self, aig, btor2):
+        """Run pono solver."""
+        if not btor2:
+            return -1 # Pono requires btor2
+        try:
+            start = time.time()
+            cmd = ["pono", "-e", "ic3bits", btor2]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            elapsed = time.time() - start
+            if "UNSAT" in r.stdout:
+                return elapsed
+            return 3600.0
+        except subprocess.TimeoutExpired:
+            return 3600.0
+        except:
             return -1
