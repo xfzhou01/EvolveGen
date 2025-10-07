@@ -1066,20 +1066,26 @@ class GraphManager:
 
     def _dump_cp_1_cpp(self):
         tmp_origin = self.program_graph
+        tmp_function_pipeline = self.program_graph_function_pipeline
         self.program_graph = self.program_graph_copy_1 
+        self.program_graph_function_pipeline = self.function_pipeline_1
 
         cp_1_cpp_str = self._dump_cpp()
 
         self.program_graph = tmp_origin
+        self.program_graph_function_pipeline = tmp_function_pipeline
         return cp_1_cpp_str
     
     def _dump_cp_2_cpp(self):
         tmp_origin = self.program_graph
+        tmp_function_pipeline = self.program_graph_function_pipeline
         self.program_graph = self.program_graph_copy_2
+        self.program_graph_function_pipeline = self.function_pipeline_2
 
         cp_2_cpp_str = self._dump_cpp()
 
         self.program_graph = tmp_origin
+        self.program_graph_function_pipeline = tmp_function_pipeline
         return cp_2_cpp_str
 
     def dump_cpp_std(self, file_path: str = "output.cpp"):
