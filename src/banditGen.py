@@ -101,8 +101,8 @@ class HLSBanditFuzz:
     def _update(self, strat, graph, perf, baseline, action_count):
         """Update pool if improved, and give feedback based on performance."""
         improved = perf > baseline
-        pstr = f"{perf:.3f}s" if perf < self.timeout_value else "timeout"
-        bstr = f"{baseline:.3f}s" if baseline >= 0 and baseline < self.timeout_value else "timeout" if baseline >= self.timeout_value else "none"
+        pstr = f"{perf:.3f}s" if perf < self.timeout_value else "good enough"
+        bstr = f"{baseline:.3f}s" if baseline >= 0 and baseline < self.timeout_value else "good enough" if baseline >= self.timeout_value else "none"
         
         if improved:
             self.pool.append((graph, perf, action_count))
@@ -118,7 +118,7 @@ class HLSBanditFuzz:
 
     def _mutate(self, parent):
         """Mutate parent graph."""
-        self.graph_mgr.program_graph = copy.deepcopy(parent)
+        self.graph_mgr.load_graph(copy.deepcopy(parent))
         action_idx = self.action_agent.select_action()
         action = self.actions[action_idx]
         if action():
@@ -174,7 +174,7 @@ class HLSBanditFuzz:
     def _pool_avg(self):
         """Average pool performance (exclude timeouts)."""
         perfs = [p for _, p, _ in self.pool if p < self.timeout_value]
-        return sum(perfs) / len(perfs) if perfs else 0.1
+        return sum(perfs) / len(perfs) if perfs else 100
 
     def _eval(self, graph):
         """Run HLS pipeline and evaluate.
@@ -216,7 +216,7 @@ class HLSBanditFuzz:
                 if perf < 0:
                     # Prediction error
                     return -1, False
-                elif perf >= 2000:
+                elif perf >= 3500:
                     # Early predictor says it will be hard - this is good!
                     self.utils.dump_good_case(graph)
                     return self.timeout_value, True
@@ -242,7 +242,7 @@ class HLSBanditFuzz:
     def _cpp(self, g):
         try:
             with self.utils.suppress_output():
-                self.graph_mgr.program_graph = g
+                self.graph_mgr.load_graph(copy.deepcopy(g))
                 f1, f2 = f"{self.out_dir}/b1.cpp", f"{self.out_dir}/b2.cpp"
                 self.graph_mgr.dump_cpp_comparsion(f1, f2)
             return [f1, f2] if os.path.exists(f1) and os.path.exists(f2) else None
