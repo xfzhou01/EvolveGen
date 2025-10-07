@@ -27,7 +27,7 @@ def align_features(feature_frame, expected_columns):
     aligned = feature_frame.copy()
     for column in expected_columns:
         if column not in aligned.columns:
-            aligned[column] = 0.0
+            raise AssertionError(f"Missing expected feature: {column}")
     aligned = aligned[expected_columns]
     return aligned
 

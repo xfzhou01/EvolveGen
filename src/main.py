@@ -26,6 +26,8 @@ def main():
     parser.add_argument('--action-count', '-a', type=int, default=20, help='Max number of actions')
     parser.add_argument('--bandit-fuzz', action='store_true', help='Enable BanditFuzz mode for performance optimization')
     parser.add_argument('--bandit-iterations', type=int, default=100, help='Number of BanditFuzz iterations (default: 100)')
+    parser.add_argument('--mode', type=str, choices=['naive', 'predict'], default='predict', help='Bandit mode: naive (actual solving) or normal (early prediction) (default: normal)')
+    parser.add_argument('--solver', type=str, choices=['abc', 'ic3ref', 'ric3'], default='ric3', help='Solver model for early prediction: abc, ic3ref, or ric3 (default: ric3)')
     
     args = parser.parse_args()
     
@@ -46,7 +48,9 @@ def main():
             bandit_fuzzer = HLSBanditFuzz(
                 output_dir=args.output_dir,
                 seed=args.seed,
-                verbose=args.verbose
+                verbose=args.verbose,
+                mode=args.mode,
+                solver=args.solver
             )
             bandit_fuzzer.max_iter = args.bandit_iterations
             bandit_fuzzer.fuzz()

@@ -9,8 +9,8 @@ class BanditFuzzUtils:
     def __init__(self, verbose=False, output_dir="./output"):
         self.verbose = verbose
         self.output_dir = output_dir
-        self.timeout_dir = os.path.join(output_dir, "timeout_cases")
-        os.makedirs(self.timeout_dir, exist_ok=True)
+        self.good_cases_dir = os.path.join(output_dir, "good_cases")
+        os.makedirs(self.good_cases_dir, exist_ok=True)
 
     @contextmanager
     def suppress_output(self):
@@ -30,19 +30,19 @@ class BanditFuzzUtils:
         if self.verbose:
             print(f"[DEBUG] {msg}")
 
-    def dump_timeout(self, graph):
-        """Dump timeout case (good benchmark)."""
+    def dump_good_case(self, graph):
+        """Dump good case (hard benchmark)."""
         try:
             aig = os.path.join(self.output_dir, "miter", "miter.aig")
             if not os.path.exists(aig):
                 return
-            
+
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            folder = os.path.join(self.timeout_dir, f"timeout_{ts}")
+            folder = os.path.join(self.good_cases_dir, f"good_{ts}")
             os.makedirs(folder, exist_ok=True)
-            
+
             # Copy key files
-            for item in ["benchmark_1.cpp", "benchmark_2.cpp", "miter"]:
+            for item in ["b1.cpp", "b2.cpp", "miter"]:
                 src = os.path.join(self.output_dir, item)
                 if os.path.exists(src):
                     dst = os.path.join(folder, item)
@@ -50,13 +50,13 @@ class BanditFuzzUtils:
                         shutil.copytree(src, dst, dirs_exist_ok=True)
                     else:
                         shutil.copy2(src, dst)
-            
+
             # Save graph
             if graph:
                 with open(os.path.join(folder, "graph.pkl"), 'wb') as f:
                     pickle.dump(graph, f)
-            
-            print(f"[TIMEOUT] Saved: {folder}")
+
+            print(f"[GOOD_CASE] Saved: {folder}")
         except:
             pass
 

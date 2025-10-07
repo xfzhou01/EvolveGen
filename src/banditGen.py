@@ -1,6 +1,7 @@
 """Hybrid Evolutionary Bandit Fuzzing"""
+# This module implements a bandit-based fuzzing approach for HLS benchmark generation
 
-import os, time, subprocess, copy, random
+import os, time, subprocess, copy, random, json, shutil
 from agents import ThompsonSampling
 from random_graph_manager import RandomGraphManager
 from vitis_hls_compiler import VitisHLSCompiler
@@ -10,28 +11,31 @@ from utils import BanditFuzzUtils
 
 
 class HLSBanditFuzz:
-    def __init__(self, output_dir="./output", seed=114513, verbose=False):
+    # Main fuzzing class combining evolutionary algorithms with bandit-based action selection
+    def __init__(self, output_dir="./output", seed=114513, verbose=False, mode="predict", solver="ric3"):
         # Components
         self.graph_mgr = RandomGraphManager(seed=seed)
         self.hls = VitisHLSCompiler(working_dir=output_dir)
         self.yosys = YosysCompiler()
         self.utils = BanditFuzzUtils(verbose=verbose, output_dir=output_dir)
-        
+
         # State
         self.seed = seed
         self.gen_count = 0
         self.pool = []  # [(graph, perf, action_count), ...]
-        
+
         # Agents
         self.actions = self.graph_mgr.bandit_action_list
         self.action_agent = ThompsonSampling(len(self.actions), 0.99, 10, 5)
         self.strategy_agent = ThompsonSampling(2, 0.99, 10, 5)  # 0=Evolve, 1=Inject
-        
+
         # Config
         self.verbose = verbose
         self.out_dir = output_dir
         self.max_iter = 100
         self.timeout_value = 3600.0  # Use 3600s for timeout cases
+        self.mode = mode  # "naive" or "predict"
+        self.solver = solver  # "abc", "ic3ref", "ric3"
         os.makedirs(output_dir, exist_ok=True)
 
     def fuzz(self):
@@ -87,7 +91,7 @@ class HLSBanditFuzz:
             return child, parent_perf, parent_actions + 1
         else:  # Inject
             avg = sum(a for _, _, a in self.pool) / len(self.pool) if self.pool else 100
-            target = max(30, int(avg)) 
+            target = max(40, int(avg)) 
             if not self._gen(target):
                 return None, -1, 0
             fresh = copy.deepcopy(self.graph_mgr.program_graph)
@@ -153,7 +157,7 @@ class HLSBanditFuzz:
     def _init(self):
         """Initialize pool with one valid graph."""
         for _ in range(5):
-            initial_actions = 20
+            initial_actions = 30
             if not self._gen(initial_actions):
                 continue
             g = copy.deepcopy(self.graph_mgr.program_graph)
@@ -204,18 +208,34 @@ class HLSBanditFuzz:
             if not aig:
                 return -1, False
             
-            # rIC3
-            perf = self._ric3(aig)
-            if perf < 0:
-                # Solver error
-                return -1, False
-            elif perf >= self.timeout_value:
-                # Timeout - this is good!
-                self.utils.dump_timeout(graph)
-                return perf, True
+            # Solver (early prediction or actual solving)
+            print(f"  Evaluating... The mode is {self.mode}")
+            if self.mode == "predict":
+                # Use early predictor
+                perf = self._early_predict(aig)
+                if perf < 0:
+                    # Prediction error
+                    return -1, False
+                elif perf >= 2000:
+                    # Early predictor says it will be hard - this is good!
+                    self.utils.dump_good_case(graph)
+                    return self.timeout_value, True
+                else:
+                    # Early predictor says it will be fast
+                    return perf, True  # Convert ms to seconds
             else:
-                # Fast solve
-                return perf, True
+                # Naive mode: actual solving
+                perf = self._ric3(aig)
+                if perf < 0:
+                    # Solver error
+                    return -1, False
+                elif perf >= self.timeout_value:
+                    # Timeout - this is good!
+                    self.utils.dump_good_case(graph)
+                    return perf, True
+                else:
+                    # Fast solve
+                    return perf, True
         except:
             return -1, False
 
@@ -282,6 +302,81 @@ class HLSBanditFuzz:
         except:
             return None
 
+    def _early_predict(self, aig):
+        """Use early predictor to estimate solving time.
+
+        Returns:
+            - predicted time in seconds if successful
+            - -1 if error
+        """
+        try:
+            # Get the project root directory (parent of src/)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)
+            
+            # Step 1: Extract features using aig2feat
+            aig_basename = os.path.splitext(os.path.basename(aig))[0]
+            feat_output_dir = f"{self.out_dir}/early_pred_temp"
+            feat_file = f"{feat_output_dir}/{aig_basename}/features.json"
+            
+            # Convert AIG path to absolute path
+            aig_abs = os.path.abspath(aig)
+            feat_output_abs = os.path.abspath(feat_output_dir)
+            
+            # Use absolute path for aig2feat
+            aig2feat_path = os.path.join(project_root, "early_predictor/target/release/aig2feat")
+            feat_cmd = [aig2feat_path, aig_abs, feat_output_abs]
+
+            r = subprocess.run(feat_cmd, capture_output=True, text=True, timeout=30, cwd=project_root)
+
+            if r.returncode != 0 or not os.path.exists(feat_file):
+                return -1
+
+            # Step 2: Load features and predict using predict_runtime
+            model_file = os.path.join(project_root, f"early_predictor/artifacts/models/{self.solver}_model.json")
+            if not os.path.exists(model_file):
+                print(f"[DEBUG] Model file not found: {model_file}")
+                return -1
+
+            # Load features from JSON
+            with open(feat_file, 'r', encoding='utf-8') as f:
+                features = json.load(f)
+
+            # Import and use predict_runtime from predict.py
+            import sys
+            predictor_path = os.path.join(project_root, "early_predictor")
+            if predictor_path not in sys.path:
+                sys.path.insert(0, predictor_path)
+            
+            from predict import predict_runtime
+            
+            # Get prediction
+            prediction = predict_runtime(model_file, features)
+            
+            # Clean up temporary directory
+            temp_feat_dir = f"{feat_output_dir}/{aig_basename}"
+            if os.path.exists(temp_feat_dir):
+                shutil.rmtree(temp_feat_dir)
+            
+            return prediction
+
+        except subprocess.TimeoutExpired:
+            print("[DEBUG] Subprocess timeout")
+            return -1
+        except Exception as e:
+            print(f"[DEBUG] Exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return -1
+        finally:
+            # Always try to clean up temporary files
+            try:
+                temp_feat_dir = f"{feat_output_dir}/{aig_basename}" if 'feat_output_dir' in locals() and 'aig_basename' in locals() else None
+                if temp_feat_dir and os.path.exists(temp_feat_dir):
+                    shutil.rmtree(temp_feat_dir)
+            except:
+                pass  # Ignore cleanup errors
+            
     def _ric3(self, aig):
         """Run rIC3 solver.
         
