@@ -54,10 +54,21 @@ class HLSBanditFuzz:
         ok, total = 0, 0
         while ok < self.max_iter:
             total += 1
-            
-            # Choose strategy
-            strat = self.strategy_agent.select_action()
-            print(f"\n[{ok+1}/{self.max_iter}] {'EVOLVE' if strat==0 else 'INJECT'}")
+
+            # Choose strategy, skip evolve when no valid parent exists
+            can_evolve = self._has_evolvable_parent()
+            forced_inject = False
+            if can_evolve:
+                strat = self.strategy_agent.select_action()
+            else:
+                strat = 1  # Force inject when evolve has no eligible parent
+                forced_inject = True
+
+            label = 'EVOLVE' if strat == 0 else 'INJECT'
+            if forced_inject:
+                print(f"\n[{ok+1}/{self.max_iter}] {label} (no evolvable parents)")
+            else:
+                print(f"\n[{ok+1}/{self.max_iter}] {label}")
             
             # Execute (may retry if cpp files are identical)
             graph, baseline, action_count = None, -1, 0
@@ -133,6 +144,10 @@ class HLSBanditFuzz:
         # Sort by performance (descending) and select the best
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0]
+
+    def _has_evolvable_parent(self):
+        """Check if there is any parent eligible for evolution."""
+        return any(p < self.timeout_value for _, p, _, _ in self.pool)
 
     def _update(self, strat, graph, perf, baseline, action_count, aig_fp):
         """Update pool if improved, and give feedback based on performance."""
