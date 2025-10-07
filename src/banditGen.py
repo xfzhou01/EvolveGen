@@ -91,7 +91,7 @@ class HLSBanditFuzz:
             return child, parent_perf, parent_actions + 1
         else:  # Inject
             avg = sum(a for _, _, a in self.pool) / len(self.pool) if self.pool else 100
-            target = max(40, int(avg)) 
+            target = min(40, int(avg)) 
             if not self._gen(target):
                 return None, -1, 0
             fresh = copy.deepcopy(self.graph_mgr.program_graph)
