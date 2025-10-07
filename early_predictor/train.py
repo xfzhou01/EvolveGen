@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
@@ -16,7 +15,7 @@ from xgboost import XGBRegressor
 
 from feature_utils import ALL_DROP_COLUMNS, prepare_features
 
-SOLVER_TARGETS = ["rIC3", "ic3ref", "abc"]
+SOLVER_TARGETS = ["pono", "rIC3", "ic3ref", "abc"]
 RANDOM_STATE = 42
 
 
@@ -160,7 +159,7 @@ def main() -> None:
         best_params, best_rmse, best_r2, trials = tune_hyperparameters(X, y, args.max_evals)
         model = train_solver_model(X, y, best_params)
 
-        joblib.dump(model, models_dir / f"{solver}_model.joblib")
+        model.save_model(models_dir / f"{solver}_model.json")
 
         feature_importance = extract_feature_importance(model)
         metrics_report[solver] = {

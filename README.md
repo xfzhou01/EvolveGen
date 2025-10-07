@@ -181,3 +181,15 @@ Enable verbose output for detailed information:
 ```bash
 python src/main.py --verbose
 ```
+
+### Train early predictor
+
+```bash
+python train.py --data-path train.csv --output-dir artifacts --max-evals 20
+```
+
+Test
+
+```bash
+python predict.py artifacts/models/rIC3_model.joblib sample_input.json
+```

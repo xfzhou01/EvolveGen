@@ -6,14 +6,18 @@ import json
 from pathlib import Path
 from typing import Dict
 
-import joblib
+from xgboost import XGBRegressor
 
 from feature_utils import ALL_DROP_COLUMNS, prepare_record
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Predict solver checking time for a single model.")
-    parser.add_argument("model_path", type=Path, help="Path to the trained XGBoost model (.joblib).")
+    parser.add_argument(
+        "model_path",
+        type=Path,
+        help="Path to the trained XGBoost model saved via save_model (e.g. .json or .ubj).",
+    )
     parser.add_argument("features_path", type=Path, help="Path to the JSON file containing the circuit features.")
     return parser.parse_args()
 
@@ -23,17 +27,18 @@ def align_features(feature_frame, expected_columns):
     aligned = feature_frame.copy()
     for column in expected_columns:
         if column not in aligned.columns:
-            aligned[column] = 0.0
+            raise AssertionError(f"Missing expected feature: {column}")
     aligned = aligned[expected_columns]
     return aligned
 
 
 def predict_runtime(model_path: Path, payload: Dict[str, object]) -> float:
-    model = joblib.load(model_path)
-    if hasattr(model, "feature_names_in_"):
-        expected_columns = list(model.feature_names_in_)
-    else:
-        expected_columns = model.get_booster().feature_names
+    model = XGBRegressor()
+    model.load_model(model_path)
+    booster = model.get_booster()
+    expected_columns = booster.feature_names
+    if expected_columns is None:
+        raise ValueError("Loaded model does not contain feature names; ensure it was trained with a pandas DataFrame.")
     feature_frame = prepare_record(payload)
     # Drop any columns that are not expected by the trained model.
     feature_frame = feature_frame.drop(columns=[col for col in feature_frame.columns if col not in expected_columns], errors="ignore")

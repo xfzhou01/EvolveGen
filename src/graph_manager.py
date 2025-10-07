@@ -1403,3 +1403,91 @@ class GraphManager:
             return True
         return False
         
+    def load_graph(self, new_graph):
+        """
+        Safely loads a new graph into the manager.
+
+        This is the correct entry point for replacing the graph, as it ensures
+        that the manager's internal state (e.g., node counters) is
+        resynchronized with the new graph's content.
+
+        Args:
+            new_graph (networkx.DiGraph): The new graph to load.
+        """
+        self.program_graph = new_graph
+        self._update_internal_state()
+
+    def _update_internal_state(self):
+        """
+        Resets and recalculates internal counters based on the current graph.
+
+        This method iterates through the nodes of the current program_graph
+        to ensure all counters are consistent with the graph's actual content.
+        This prevents state corruption issues.
+        """
+        # Reset all counters to their initial state
+        self.op_counter = 0
+        self.array_node_counter = 0
+        self.loop_node_counter = 0
+        self.branch_node_counter = 0
+        self.pragma_node_counter = 0
+        self.visit_node_counter = 0
+        self.write_node_counter = 0
+        self.dep_node_counter = 0
+
+        if self.program_graph is None:
+            return
+
+        # Recalculate counters by iterating through the new graph's nodes
+        for node in self.program_graph.nodes():
+            if hasattr(node, 'name') and isinstance(node.name, str):
+                node_id = node.name
+                if node_id.startswith('op_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.op_counter = max(self.op_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass  # Ignore malformed node IDs
+                elif node_id.startswith('loop_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.loop_node_counter = max(self.loop_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+                elif node_id.startswith('array_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.array_node_counter = max(self.array_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+                elif node_id.startswith('branch_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.branch_node_counter = max(self.branch_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+                elif node_id.startswith('pragma_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.pragma_node_counter = max(self.pragma_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+                elif node_id.startswith('visit_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.visit_node_counter = max(self.visit_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+                elif node_id.startswith('write_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.write_node_counter = max(self.write_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+                elif node_id.startswith('dep_'):
+                    try:
+                        num = int(node_id.split('_')[1])
+                        self.dep_node_counter = max(self.dep_node_counter, num + 1)
+                    except (ValueError, IndexError):
+                        pass
+        
