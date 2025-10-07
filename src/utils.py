@@ -34,6 +34,7 @@ class BanditFuzzUtils:
         """Dump good case (hard benchmark)."""
         try:
             aig = os.path.join(self.output_dir, "miter", "miter.aig")
+            btor2 = os.path.join(self.output_dir, "miter", "miter.btor2")
             if not os.path.exists(aig):
                 return
 
@@ -50,6 +51,10 @@ class BanditFuzzUtils:
                         shutil.copytree(src, dst, dirs_exist_ok=True)
                     else:
                         shutil.copy2(src, dst)
+            
+            # Copy BTOR2 file if it exists
+            if os.path.exists(btor2):
+                shutil.copy2(btor2, os.path.join(folder, "miter", "miter.btor2"))
 
             # Save graph
             if graph:
@@ -67,20 +72,21 @@ class BanditFuzzUtils:
         print("="*60)
         print(f"Completed: {successful}/{target} ({successful/total*100:.1f}% success)")
         print(f"Pool size: {len(pool)}")
+        print(f"Unique AIGs: {len(pool)} (duplicates filtered)")
         
-        # Updated: unpack triple (graph, perf, action_count)
-        perfs = [p for _, p, _ in pool if p != float('inf')]
+        # Updated: unpack quadruple (graph, perf, action_count, aig_fingerprint)
+        perfs = [p for _, p, _, _ in pool if p != float('inf')]
         if perfs:
             print(f"Avg perf: {sum(perfs)/len(perfs):.3f}s, Best: {max(perfs):.3f}s")
-            print(f"Good cases: {sum(1 for _, p, _ in pool if p == 3600.0)}")
+            print(f"Good cases: {sum(1 for _, p, _, _ in pool if p == 3600.0)}")
         
         # Updated: node count statistics
-        sizes = [g.number_of_nodes() for g, _, _ in pool]
+        sizes = [g.number_of_nodes() for g, _, _, _ in pool]
         if sizes:
             print(f"Avg size: {sum(sizes)/len(sizes):.1f}, Range: {min(sizes)}-{max(sizes)}")
         
-        # New: action count statistics
-        actions = [a for _, _, a in pool]
+        # Updated: action count statistics
+        actions = [a for _, _, a, _ in pool]
         if actions:
             print(f"Avg actions: {sum(actions)/len(actions):.1f}, Range: {min(actions)}-{max(actions)}")
         

@@ -1,7 +1,7 @@
 """Hybrid Evolutionary Bandit Fuzzing"""
 # This module implements a bandit-based fuzzing approach for HLS benchmark generation
 
-import os, time, subprocess, copy, random, json, shutil
+import os, time, subprocess, copy, random, json, shutil, hashlib
 from agents import ThompsonSampling
 from random_graph_manager import RandomGraphManager
 from vitis_hls_compiler import VitisHLSCompiler
@@ -22,7 +22,8 @@ class HLSBanditFuzz:
         # State
         self.seed = seed
         self.gen_count = 0
-        self.pool = []  # [(graph, perf, action_count), ...]
+        self.pool = []  # [(graph, perf, action_count, aig_fingerprint), ...]
+        self.aig_fingerprints = set()  # Track unique AIG fingerprints
 
         # Agents
         self.actions = self.graph_mgr.bandit_action_list
@@ -58,21 +59,43 @@ class HLSBanditFuzz:
             strat = self.strategy_agent.select_action()
             print(f"\n[{ok+1}/{self.max_iter}] {'EVOLVE' if strat==0 else 'INJECT'}")
             
-            # Execute
-            graph, baseline, action_count = self._exec(strat)
+            # Execute (may retry if cpp files are identical)
+            graph, baseline, action_count = None, -1, 0
+            max_retries = 3
+            for retry in range(max_retries):
+                graph, baseline, action_count = self._exec(strat)
+                if graph is None:
+                    break  # Technical failure, stop retrying
+                
+                # Check if cpp files are identical (no effective loop)
+                cpp1_path = f"{self.out_dir}/b1.cpp"
+                cpp2_path = f"{self.out_dir}/b2.cpp"
+                if os.path.exists(cpp1_path) and os.path.exists(cpp2_path):
+                    with open(cpp1_path, 'r') as f1, open(cpp2_path, 'r') as f2:
+                        if f1.read() == f2.read():
+                            print(f"  ✗ CPP files identical (no effective loop), retry {retry+1}/{max_retries}")
+                            continue  # Retry generation
+                
+                break  # Success or max retries reached
+            
             if graph is None:
                 continue
             
             # Evaluate
-            perf, status = self._eval(graph)
+            perf, status, aig_fp = self._eval(graph)
             if not status:
                 # Technical failure - don't penalize agents, just skip
-                print("  (evaluation failed, skipping)")
+                print(" ✗ evaluation failed, skipping")
+                continue
+            
+            # Check for duplicate AIG fingerprint
+            if aig_fp in self.aig_fingerprints:
+                print(f"  ✗ Duplicate AIG fingerprint, skipping")
                 continue
             
             # Update pool and give feedback based on performance
             ok += 1
-            self._update(strat, graph, perf, baseline, action_count)
+            self._update(strat, graph, perf, baseline, action_count, aig_fp)
         
         self.utils.print_summary(self.pool, self.max_iter, ok, total)
 
@@ -81,16 +104,17 @@ class HLSBanditFuzz:
         if strat == 0:  # Evolve
             if not self.pool:
                 return None, -1, 0
-            # Mask out timeout cases (>= timeout_value)
-            pool_case2evolve = [(g, p, a) for g, p, a in self.pool if p < self.timeout_value]
-            if not pool_case2evolve:
+            
+            # Select parent with highest predicted time (excluding timeouts)
+            parent, parent_perf, parent_actions, _ = self._select_best_parent()
+            if parent is None:
                 return None, -1, 0
-            parent, parent_perf, parent_actions = random.choice(pool_case2evolve)
+                
             print(f"  Parent: {parent.number_of_nodes()} nodes, {parent_actions} actions, perf={parent_perf:.3f}s")
             child = self._mutate(parent)
             return child, parent_perf, parent_actions + 1
         else:  # Inject
-            avg = sum(a for _, _, a in self.pool) / len(self.pool) if self.pool else 100
+            avg = sum(a for _, _, a, _ in self.pool) / len(self.pool) if self.pool else 100
             target = min(40, int(avg)) 
             if not self._gen(target):
                 return None, -1, 0
@@ -98,14 +122,27 @@ class HLSBanditFuzz:
             pool_avg = self._pool_avg()
             return fresh, pool_avg, target
 
-    def _update(self, strat, graph, perf, baseline, action_count):
+    def _select_best_parent(self):
+        """Select parent with highest predicted time (excluding timeouts)."""
+        # Filter out timeout cases
+        candidates = [(g, p, a, fp) for g, p, a, fp in self.pool if p < self.timeout_value]
+        
+        if not candidates:
+            return None, -1, 0, None
+        
+        # Sort by performance (descending) and select the best
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return candidates[0]
+
+    def _update(self, strat, graph, perf, baseline, action_count, aig_fp):
         """Update pool if improved, and give feedback based on performance."""
         improved = perf > baseline
         pstr = f"{perf:.3f}s" if perf < self.timeout_value else "good enough"
         bstr = f"{baseline:.3f}s" if baseline >= 0 and baseline < self.timeout_value else "good enough" if baseline >= self.timeout_value else "none"
         
         if improved:
-            self.pool.append((graph, perf, action_count))
+            self.pool.append((graph, perf, action_count, aig_fp))
+            self.aig_fingerprints.add(aig_fp)
             print(f"  ✓ {pstr} > {bstr}, pool={len(self.pool)}, actions={action_count}")
             self.strategy_agent.reward(True)
             if strat == 0:
@@ -162,51 +199,78 @@ class HLSBanditFuzz:
                 continue
             g = copy.deepcopy(self.graph_mgr.program_graph)
             print(f"Begin eval")
-            perf, status = self._eval(g)
+            perf, status, aig_fp = self._eval(g)
             if not status:
                 print(f"Eval failed, retry...")
                 continue
             print(f"Success (perf={perf:.3f}s, actions={initial_actions})...Add to pool")
-            self.pool.append((g, perf, initial_actions))
+            self.pool.append((g, perf, initial_actions, aig_fp))
+            self.aig_fingerprints.add(aig_fp)
             return True
         return False
 
     def _pool_avg(self):
         """Average pool performance (exclude timeouts)."""
-        perfs = [p for _, p, _ in self.pool if p < self.timeout_value]
+        perfs = [p for _, p, _, _ in self.pool if p < self.timeout_value]
         return sum(perfs) / len(perfs) if perfs else 100
+
+    def _compute_aig_fingerprint(self, aig_path):
+        """Compute SHA256 fingerprint of AIG file."""
+        try:
+            with open(aig_path, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except:
+            return None
 
     def _eval(self, graph):
         """Run HLS pipeline and evaluate.
         
         Returns:
-            (perf, status) where:
+            (perf, status, aig_fingerprint) where:
             - perf: -1 for failure, 0.0-10.0 for fast solve, 3600.0 for timeout
             - status: False for failure, True for success (including timeout)
+            - aig_fingerprint: SHA256 hash of AIG file, or None if failed
         """
         try:
             # C++
             cpp = self._cpp(graph)
             if not cpp:
-                return -1, False
+                return -1, False, None
+            
+            # Check if cpp files are identical (no effective loop)
+            cpp1_path, cpp2_path = cpp[0], cpp[1]
+            with open(cpp1_path, 'r') as f1, open(cpp2_path, 'r') as f2:
+                if f1.read() == f2.read():
+                    print("  ✗ CPP files identical (no effective loop)")
+                    return -1, False, None
             
             # HLS
             vs = self._hls(cpp)
             if not vs:
-                return -1, False
+                return -1, False, None
             
             # Miter
             m = self._miter(vs)
             if not m:
-                return -1, False
+                return -1, False, None
             elif m == "COMB":
                 # Combinational circuit, can't verify - retry
-                return -1, False
+                return -1, False, None
             
             # AIG
             aig = self._aig(m)
             if not aig:
-                return -1, False
+                return -1, False, None
+            
+            # Compute AIG fingerprint
+            aig_fp = self._compute_aig_fingerprint(aig)
+            if aig_fp is None:
+                return -1, False, None
+            
+            # BTOR2
+            btor2 = self._btor2(m)
+            if not btor2:
+                print("  ✗  BTOR2 generation failed (continuing anyway)")
             
             # Solver (early prediction or actual solving)
             print(f"  Evaluating... The mode is {self.mode}")
@@ -215,29 +279,29 @@ class HLSBanditFuzz:
                 perf = self._early_predict(aig)
                 if perf < 0:
                     # Prediction error
-                    return -1, False
+                    return -1, False, None
                 elif perf >= 3500:
                     # Early predictor says it will be hard - this is good!
                     self.utils.dump_good_case(graph)
-                    return self.timeout_value, True
+                    return self.timeout_value, True, aig_fp
                 else:
                     # Early predictor says it will be fast
-                    return perf, True  # Convert ms to seconds
+                    return perf, True, aig_fp
             else:
                 # Naive mode: actual solving
                 perf = self._ric3(aig)
                 if perf < 0:
                     # Solver error
-                    return -1, False
+                    return -1, False, None
                 elif perf >= self.timeout_value:
                     # Timeout - this is good!
                     self.utils.dump_good_case(graph)
-                    return perf, True
+                    return perf, True, aig_fp
                 else:
                     # Fast solve
-                    return perf, True
+                    return perf, True, aig_fp
         except:
-            return -1, False
+            return -1, False, None
 
     def _cpp(self, g):
         try:
@@ -300,6 +364,58 @@ class HLSBanditFuzz:
                 self.yosys.execute(mfile, adir, afile, "top_A_times_top_B")
             return afile if os.path.exists(afile) else None
         except:
+            return None
+
+    def _btor2(self, mdir):
+        """Generate BTOR2 file from miter Verilog.
+        
+        Returns:
+            Path to BTOR2 file if successful, None otherwise
+        """
+        try:
+            mfile = f"{mdir}/miter.v"
+            if not os.path.exists(mfile):
+                return None
+            
+            btor2_dir = f"{self.out_dir}/miter"
+            os.makedirs(btor2_dir, exist_ok=True)
+            btor2_file = f"{btor2_dir}/miter.btor2"
+            
+            # Use Yosys to generate BTOR2
+            yosys_script = f"""
+read -sv {mfile}
+prep -top top_A_times_top_B
+flatten
+memory -nomap
+hierarchy -check
+setundef -undriven -init -expose
+write_btor -s {btor2_file}
+"""
+            
+            script_path = f"{btor2_dir}/gen_btor2.ys"
+            with open(script_path, 'w') as f:
+                f.write(yosys_script)
+            
+            # Execute Yosys
+            result = subprocess.run(
+                ['yosys', '-s', script_path],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0 and os.path.exists(btor2_file):
+                print(f"  ✓ BTOR2 generated: {btor2_file}")
+                return btor2_file
+            else:
+                print(f"  ✗ BTOR2 generation failed")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            print(f"  ✗ BTOR2 generation timeout")
+            return None
+        except Exception as e:
+            print(f"  ✗ BTOR2 generation error: {e}")
             return None
 
     def _early_predict(self, aig):
