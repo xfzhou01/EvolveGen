@@ -106,7 +106,8 @@ class HLSBanditFuzz:
             
             # Update pool and give feedback based on performance
             ok += 1
-            self._update(strat, graph, perf, baseline, action_count, aig_fp)
+            strategy_sampled = can_evolve
+            self._update(strat, graph, perf, baseline, action_count, aig_fp, strategy_sampled=strategy_sampled)
         
         self.utils.print_summary(self.pool, self.max_iter, ok, total)
 
@@ -149,7 +150,7 @@ class HLSBanditFuzz:
         """Check if there is any parent eligible for evolution."""
         return any(p < self.timeout_value for _, p, _, _ in self.pool)
 
-    def _update(self, strat, graph, perf, baseline, action_count, aig_fp):
+    def _update(self, strat, graph, perf, baseline, action_count, aig_fp, strategy_sampled=True):
         """Update pool if improved, and give feedback based on performance."""
         improved = perf > baseline
         pstr = f"{perf:.3f}s" if perf < self.timeout_value else "good enough"
@@ -159,12 +160,14 @@ class HLSBanditFuzz:
             self.pool.append((graph, perf, action_count, aig_fp))
             self.aig_fingerprints.add(aig_fp)
             print(f"  ✓ {pstr} > {bstr}, pool={len(self.pool)}, actions={action_count}")
-            self.strategy_agent.reward(True)
+            if strategy_sampled:
+                self.strategy_agent.reward(True)
             if strat == 0:
                 self.action_agent.reward(True)
         else:
             print(f"  ✗ {pstr} <= {bstr}")
-            self.strategy_agent.reward(False)
+            if strategy_sampled:
+                self.strategy_agent.reward(False)
             if strat == 0:
                 self.action_agent.reward(False)
 
