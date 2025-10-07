@@ -15,7 +15,7 @@ from xgboost import XGBRegressor
 
 from feature_utils import ALL_DROP_COLUMNS, prepare_features
 
-SOLVER_TARGETS = ["rIC3", "ic3ref", "abc"]
+SOLVER_TARGETS = ["pono", "rIC3", "ic3ref", "abc"]
 RANDOM_STATE = 42
 
 
